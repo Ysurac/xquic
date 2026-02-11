@@ -484,6 +484,387 @@ test_route_advertisement_errors(void)
     CU_ASSERT_EQUAL(rc, -1);
 }
 
+/* ── IP checksum ── */
+
+static void
+test_ip_checksum(void)
+{
+    /* RFC 1071 example: a known IP header with pre-computed checksum.
+     * We zero out the checksum field, compute, and verify. */
+    uint8_t hdr[20] = {
+        0x45, 0x00, 0x00, 0x3c, 0x1c, 0x46, 0x40, 0x00,
+        0x40, 0x06, 0x00, 0x00, /* checksum zeroed */
+        0xac, 0x10, 0x0a, 0x63,  /* src: 172.16.10.99 */
+        0xac, 0x10, 0x0a, 0x0c,  /* dst: 172.16.10.12 */
+    };
+    uint16_t cksum = masque_ip_checksum(hdr, 20);
+    /* Set the checksum in the header and verify the total is 0 */
+    hdr[10] = (uint8_t)(cksum >> 8);
+    hdr[11] = (uint8_t)(cksum & 0xFF);
+    CU_ASSERT_EQUAL(masque_ip_checksum(hdr, 20), 0);
+
+    /* Empty data → checksum should be 0xFFFF */
+    CU_ASSERT_EQUAL(masque_ip_checksum(hdr, 0), 0xFFFF);
+
+    /* Odd-length data */
+    uint8_t odd[3] = {0x01, 0x02, 0x03};
+    uint16_t odd_cksum = masque_ip_checksum(odd, 3);
+    /* Verify round-trip: sum of data + checksum should be 0 */
+    uint32_t verify = 0x0102 + 0x0300 + odd_cksum;
+    while (verify >> 16) {
+        verify = (verify & 0xFFFF) + (verify >> 16);
+    }
+    CU_ASSERT_EQUAL((uint16_t)~verify, 0);
+}
+
+/* ── ICMP echo builder ── */
+
+static void
+test_icmp_echo_build(void)
+{
+    uint8_t pkt[64];
+    uint8_t src[4] = {10, 0, 0, 2};
+    uint8_t dst[4] = {10, 0, 0, 1};
+
+    /* Build ICMP echo */
+    size_t len = masque_build_icmp_echo(pkt, sizeof(pkt), src, dst);
+    CU_ASSERT_EQUAL(len, 32);  /* 20 IP + 12 ICMP */
+
+    /* Verify IPv4 header fields */
+    CU_ASSERT_EQUAL(pkt[0], 0x45);         /* version=4, IHL=5 */
+    CU_ASSERT_EQUAL(pkt[8], 64);           /* TTL */
+    CU_ASSERT_EQUAL(pkt[9], 1);            /* Protocol: ICMP */
+    CU_ASSERT_EQUAL(pkt[2], 0);            /* Total length MSB */
+    CU_ASSERT_EQUAL(pkt[3], 32);           /* Total length LSB */
+
+    /* Verify source and destination IPs */
+    CU_ASSERT(memcmp(pkt + 12, src, 4) == 0);
+    CU_ASSERT(memcmp(pkt + 16, dst, 4) == 0);
+
+    /* Verify IP header checksum is correct (sum with checksum should be 0) */
+    CU_ASSERT_EQUAL(masque_ip_checksum(pkt, 20), 0);
+
+    /* Verify ICMP header */
+    CU_ASSERT_EQUAL(pkt[20], 8);           /* Type: Echo Request */
+    CU_ASSERT_EQUAL(pkt[21], 0);           /* Code */
+
+    /* Verify ICMP checksum is correct */
+    CU_ASSERT_EQUAL(masque_ip_checksum(pkt + 20, 12), 0);
+
+    /* Verify ICMP payload is "TEST" */
+    CU_ASSERT_EQUAL(pkt[28], 'T');
+    CU_ASSERT_EQUAL(pkt[29], 'E');
+    CU_ASSERT_EQUAL(pkt[30], 'S');
+    CU_ASSERT_EQUAL(pkt[31], 'T');
+
+    /* Different IPs should produce different checksums */
+    uint8_t pkt2[64];
+    uint8_t src2[4] = {192, 168, 1, 100};
+    uint8_t dst2[4] = {8, 8, 8, 8};
+    size_t len2 = masque_build_icmp_echo(pkt2, sizeof(pkt2), src2, dst2);
+    CU_ASSERT_EQUAL(len2, 32);
+    CU_ASSERT_EQUAL(masque_ip_checksum(pkt2, 20), 0);
+    CU_ASSERT_EQUAL(masque_ip_checksum(pkt2 + 20, 12), 0);
+    /* IP checksums differ (different addresses) */
+    CU_ASSERT(memcmp(pkt + 10, pkt2 + 10, 2) != 0);
+    /* But ICMP checksums are the same (same ICMP payload/type) */
+    CU_ASSERT(memcmp(pkt + 22, pkt2 + 22, 2) == 0);
+
+    /* Buffer too small → 0 */
+    CU_ASSERT_EQUAL(masque_build_icmp_echo(pkt, 31, src, dst), 0);
+    CU_ASSERT_EQUAL(masque_build_icmp_echo(pkt, 0, src, dst), 0);
+}
+
+/* ── Capsule chaining (multiple capsules back-to-back) ── */
+
+static void
+test_capsule_chaining(void)
+{
+    uint8_t buf[512];
+    size_t off = 0;
+
+    /* Encode ADDRESS_ASSIGN capsule (type=1) */
+    uint8_t assign_payload[7] = {0x00, 4, 10, 0, 0, 2, 32};
+    size_t n = masque_capsule_encode(buf + off, sizeof(buf) - off,
+                                      MASQUE_CAPSULE_ADDRESS_ASSIGN,
+                                      assign_payload, sizeof(assign_payload));
+    CU_ASSERT(n > 0);
+    off += n;
+
+    /* Encode ROUTE_ADVERTISEMENT capsule (type=3) */
+    uint8_t route_payload[10] = {4, 0,0,0,0, 255,255,255,255, 0};
+    n = masque_capsule_encode(buf + off, sizeof(buf) - off,
+                               MASQUE_CAPSULE_ROUTE_ADVERTISEMENT,
+                               route_payload, sizeof(route_payload));
+    CU_ASSERT(n > 0);
+    off += n;
+
+    /* Now decode both capsules sequentially */
+    size_t parse_off = 0;
+    uint64_t type;
+    size_t pay_off, pay_len;
+
+    /* Decode capsule 1 */
+    int rc = masque_capsule_decode(buf + parse_off, off - parse_off,
+                                    &type, &pay_off, &pay_len);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(type, MASQUE_CAPSULE_ADDRESS_ASSIGN);
+    CU_ASSERT_EQUAL(pay_len, 7);
+
+    /* Verify ADDRESS_ASSIGN payload */
+    uint64_t req_id;
+    uint8_t ip_ver, ip_addr[16], pfx_len;
+    size_t ip_addr_len;
+    rc = masque_parse_address_assign(buf + parse_off + pay_off, pay_len,
+                                      &req_id, &ip_ver, ip_addr, &ip_addr_len, &pfx_len);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(ip_addr[3], 2);
+    CU_ASSERT_EQUAL(pfx_len, 32);
+
+    parse_off += pay_off + pay_len;
+
+    /* Decode capsule 2 */
+    rc = masque_capsule_decode(buf + parse_off, off - parse_off,
+                                &type, &pay_off, &pay_len);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(type, MASQUE_CAPSULE_ROUTE_ADVERTISEMENT);
+    CU_ASSERT_EQUAL(pay_len, 10);
+
+    /* Verify ROUTE_ADVERTISEMENT payload */
+    uint8_t r_ver, start_ip[16], end_ip[16], r_proto;
+    size_t r_addr_len, consumed;
+    rc = masque_parse_route_advertisement(buf + parse_off + pay_off, pay_len,
+                                           &r_ver, start_ip, end_ip,
+                                           &r_addr_len, &r_proto, &consumed);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(r_ver, 4);
+    CU_ASSERT_EQUAL(end_ip[0], 255);
+}
+
+/* ── Large capsule payload (2-byte varint length) ── */
+
+static void
+test_capsule_large_payload(void)
+{
+    /* Payload of 100 bytes → length varint = 2 bytes (100 >= 64) */
+    uint8_t payload[100];
+    memset(payload, 0xAB, sizeof(payload));
+    uint8_t buf[256];
+
+    size_t enc_len = masque_capsule_encode(buf, sizeof(buf),
+                                            MASQUE_CAPSULE_DATAGRAM,
+                                            payload, sizeof(payload));
+    CU_ASSERT(enc_len > 0);
+    /* type(1) + length(2) + payload(100) = 103 */
+    CU_ASSERT_EQUAL(enc_len, 1 + 2 + 100);
+
+    uint64_t type;
+    size_t pay_off, pay_len;
+    int rc = masque_capsule_decode(buf, enc_len, &type, &pay_off, &pay_len);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(type, MASQUE_CAPSULE_DATAGRAM);
+    CU_ASSERT_EQUAL(pay_len, 100);
+    CU_ASSERT(memcmp(buf + pay_off, payload, 100) == 0);
+}
+
+/* ── Unknown capsule type (should decode fine) ── */
+
+static void
+test_capsule_unknown_type(void)
+{
+    uint8_t buf[32];
+    uint8_t payload[] = "unknown";
+    size_t enc_len = masque_capsule_encode(buf, sizeof(buf),
+                                            0xFF,  /* unknown type */
+                                            payload, sizeof(payload) - 1);
+    CU_ASSERT(enc_len > 0);
+
+    uint64_t type;
+    size_t pay_off, pay_len;
+    int rc = masque_capsule_decode(buf, enc_len, &type, &pay_off, &pay_len);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(type, 0xFF);
+    CU_ASSERT_EQUAL(pay_len, 7);
+}
+
+/* ── Empty-payload datagram framing ── */
+
+static void
+test_udp_framing_empty_payload(void)
+{
+    uint8_t framed[16];
+
+    /* Frame empty UDP payload */
+    size_t flen = masque_frame_udp_datagram(framed, sizeof(framed),
+                                             0, NULL, 0);
+    /* Should succeed: just qid + ctx, no payload */
+    CU_ASSERT_EQUAL(flen, 2);  /* qid(1) + ctx(1) */
+
+    uint64_t qid, ctx;
+    size_t poff, plen;
+    int rc = masque_unframe_udp_datagram(framed, flen, &qid, &ctx, &poff, &plen);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(qid, 0);
+    CU_ASSERT_EQUAL(ctx, 0);
+    CU_ASSERT_EQUAL(plen, 0);
+}
+
+/* ── Capsule with truncated payload (declared length > available) ── */
+
+static void
+test_capsule_truncated_payload(void)
+{
+    /* Build a valid capsule then truncate it */
+    uint8_t payload[20];
+    memset(payload, 0xCC, sizeof(payload));
+    uint8_t buf[64];
+    size_t enc_len = masque_capsule_encode(buf, sizeof(buf),
+                                            MASQUE_CAPSULE_DATAGRAM,
+                                            payload, sizeof(payload));
+    CU_ASSERT(enc_len > 0);
+
+    /* Decode should succeed (it trusts the length field) */
+    uint64_t type;
+    size_t pay_off, pay_len;
+    int rc = masque_capsule_decode(buf, enc_len, &type, &pay_off, &pay_len);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(pay_len, 20);
+
+    /* But if we give it a buffer shorter than pay_off + pay_len,
+     * the decoder still succeeds (it only parses the header).
+     * Caller must verify: pay_off + pay_len <= buflen */
+    rc = masque_capsule_decode(buf, 3, &type, &pay_off, &pay_len);
+    CU_ASSERT_EQUAL(rc, 0);
+    /* pay_off + pay_len > 3, caller must detect this */
+    CU_ASSERT(pay_off + pay_len > 3);
+}
+
+/* ── ADDRESS_ASSIGN: various truncation points ── */
+
+static void
+test_address_assign_truncation_variants(void)
+{
+    uint64_t req_id;
+    uint8_t ip_ver, ip_addr[16], pfx_len;
+    size_t ip_addr_len;
+
+    /* Empty payload */
+    CU_ASSERT_EQUAL(masque_parse_address_assign(NULL, 0,
+        &req_id, &ip_ver, ip_addr, &ip_addr_len, &pfx_len), -1);
+
+    /* Only request_id, no ip_version */
+    uint8_t p1[1] = {0x00};
+    CU_ASSERT_EQUAL(masque_parse_address_assign(p1, 1,
+        &req_id, &ip_ver, ip_addr, &ip_addr_len, &pfx_len), -1);
+
+    /* request_id + ip_version but no address */
+    uint8_t p2[2] = {0x00, 4};
+    CU_ASSERT_EQUAL(masque_parse_address_assign(p2, 2,
+        &req_id, &ip_ver, ip_addr, &ip_addr_len, &pfx_len), -1);
+
+    /* request_id + ip_version + partial IPv4 address (3 bytes) */
+    uint8_t p3[5] = {0x00, 4, 10, 0, 0};
+    CU_ASSERT_EQUAL(masque_parse_address_assign(p3, 5,
+        &req_id, &ip_ver, ip_addr, &ip_addr_len, &pfx_len), -1);
+
+    /* request_id + ip_version + full IPv4 but no prefix */
+    uint8_t p4[6] = {0x00, 4, 10, 0, 0, 1};
+    CU_ASSERT_EQUAL(masque_parse_address_assign(p4, 6,
+        &req_id, &ip_ver, ip_addr, &ip_addr_len, &pfx_len), -1);
+
+    /* Correct minimal IPv4 */
+    uint8_t p5[7] = {0x00, 4, 10, 0, 0, 1, 32};
+    CU_ASSERT_EQUAL(masque_parse_address_assign(p5, 7,
+        &req_id, &ip_ver, ip_addr, &ip_addr_len, &pfx_len), 0);
+
+    /* Large request_id (2-byte varint = 100) */
+    uint8_t p6[8];
+    p6[0] = 0x40;  /* 2-byte varint prefix */
+    p6[1] = 100;   /* request_id = 100 */
+    p6[2] = 4;     /* IPv4 */
+    p6[3] = 172; p6[4] = 16; p6[5] = 0; p6[6] = 1;
+    p6[7] = 24;    /* /24 */
+    CU_ASSERT_EQUAL(masque_parse_address_assign(p6, 8,
+        &req_id, &ip_ver, ip_addr, &ip_addr_len, &pfx_len), 0);
+    CU_ASSERT_EQUAL(req_id, 100);
+    CU_ASSERT_EQUAL(ip_addr[0], 172);
+    CU_ASSERT_EQUAL(pfx_len, 24);
+}
+
+/* ── Full capsule-wrapped ADDRESS_ASSIGN decode ── */
+
+static void
+test_capsule_address_assign_full(void)
+{
+    /* Simulate what connect-ip-go sends:
+     * capsule(type=1, payload=ADDRESS_ASSIGN(req_id=0, IPv4=10.0.0.2/32)) */
+    uint8_t assign_payload[7] = {0x00, 4, 10, 0, 0, 2, 32};
+    uint8_t capsule[32];
+    size_t cap_len = masque_capsule_encode(capsule, sizeof(capsule),
+                                            MASQUE_CAPSULE_ADDRESS_ASSIGN,
+                                            assign_payload, sizeof(assign_payload));
+    CU_ASSERT(cap_len > 0);
+
+    /* Decode capsule header */
+    uint64_t type;
+    size_t pay_off, pay_len;
+    int rc = masque_capsule_decode(capsule, cap_len, &type, &pay_off, &pay_len);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(type, 1);
+
+    /* Decode address assign payload */
+    uint64_t req_id;
+    uint8_t ip_ver, ip_addr[16], pfx_len;
+    size_t ip_addr_len;
+    rc = masque_parse_address_assign(capsule + pay_off, pay_len,
+                                      &req_id, &ip_ver, ip_addr, &ip_addr_len, &pfx_len);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(req_id, 0);
+    CU_ASSERT_EQUAL(ip_ver, 4);
+    CU_ASSERT_EQUAL(ip_addr[0], 10);
+    CU_ASSERT_EQUAL(ip_addr[1], 0);
+    CU_ASSERT_EQUAL(ip_addr[2], 0);
+    CU_ASSERT_EQUAL(ip_addr[3], 2);
+    CU_ASSERT_EQUAL(pfx_len, 32);
+}
+
+/* ── CONNECT-IP datagram framing (IP packet in HTTP Datagram) ── */
+
+static void
+test_connect_ip_datagram_roundtrip(void)
+{
+    /* Build ICMP echo → frame as HTTP Datagram → unframe → verify IP packet */
+    uint8_t src[4] = {10, 0, 0, 2};
+    uint8_t dst[4] = {10, 0, 0, 1};
+    uint8_t ip_pkt[64];
+    size_t ip_len = masque_build_icmp_echo(ip_pkt, sizeof(ip_pkt), src, dst);
+    CU_ASSERT_EQUAL(ip_len, 32);
+
+    /* Frame as HTTP Datagram (stream_id=0) */
+    uint8_t dgram[128];
+    size_t dgram_len = masque_frame_udp_datagram(dgram, sizeof(dgram),
+                                                   0, ip_pkt, ip_len);
+    CU_ASSERT(dgram_len > 0);
+    CU_ASSERT_EQUAL(dgram_len, 1 + 1 + 32); /* qid(1) + ctx(1) + ip_pkt(32) */
+
+    /* Unframe */
+    uint64_t qid, ctx;
+    size_t pay_off, pay_len;
+    int rc = masque_unframe_udp_datagram(dgram, dgram_len,
+                                          &qid, &ctx, &pay_off, &pay_len);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(qid, 0);
+    CU_ASSERT_EQUAL(ctx, 0);
+    CU_ASSERT_EQUAL(pay_len, 32);
+
+    /* Verify the unframed payload is the original IP packet */
+    CU_ASSERT(memcmp(dgram + pay_off, ip_pkt, ip_len) == 0);
+
+    /* Verify the IP packet is still valid */
+    CU_ASSERT_EQUAL(masque_ip_checksum(dgram + pay_off, 20), 0);
+    CU_ASSERT_EQUAL(masque_ip_checksum(dgram + pay_off + 20, 12), 0);
+}
+
 /* ── Entry point ── */
 
 void
@@ -494,11 +875,21 @@ xqc_test_masque(void)
     test_varint_buffer_underflow();
     test_udp_framing_roundtrip();
     test_udp_framing_errors();
+    test_udp_framing_empty_payload();
     test_udp_mss();
     test_capsule_roundtrip();
     test_capsule_errors();
+    test_capsule_chaining();
+    test_capsule_large_payload();
+    test_capsule_unknown_type();
+    test_capsule_truncated_payload();
     test_address_assign_parse();
+    test_address_assign_truncation_variants();
+    test_capsule_address_assign_full();
     test_address_request_build();
     test_route_advertisement_parse();
     test_route_advertisement_errors();
+    test_ip_checksum();
+    test_icmp_echo_build();
+    test_connect_ip_datagram_roundtrip();
 }

@@ -109,11 +109,13 @@ struct masque_tunnel_s {
     const char             *send_data;
     size_t                  send_data_len;
     int                     send_done;
+    int                     send_count;    /* datagrams sent so far */
 
     /* received data */
     uint8_t                 recv_buf[65536];
     size_t                  recv_len;
     int                     recv_done;
+    int                     recv_count;    /* datagrams received so far */
 
     /* CONNECT-IP state */
     uint8_t                 assigned_ip[16];
@@ -137,6 +139,7 @@ static char     g_proxy_host[256]       = "";  /* SNI host, defaults to proxy_ad
 static char     g_uri_path[1024]        = "";  /* override .well-known URI template */
 static int      g_allow_self_signed     = 0;   /* -S: accept self-signed certs */
 static int      g_connect_ip            = 0;   /* -I: use CONNECT-IP instead of CONNECT-UDP */
+static int      g_send_count            = 1;   /* -n: number of datagrams/echoes to send */
 
 /* ──────────────────────────────────────────────────────────── */
 /*  Forward declarations                                        */
@@ -363,76 +366,7 @@ masque_tunnel_send_dgram(masque_tunnel_t *tun, const uint8_t *data, size_t len)
     return 0;
 }
 
-/* ──────────────────────────────────────────────────────────── */
-/*  CONNECT-IP: build a minimal IPv4 ICMP echo request packet  */
-/* ──────────────────────────────────────────────────────────── */
-
-static uint16_t
-masque_ip_checksum(const uint8_t *data, size_t len)
-{
-    uint32_t sum = 0;
-    for (size_t i = 0; i + 1 < len; i += 2) {
-        sum += ((uint16_t)data[i] << 8) | data[i + 1];
-    }
-    if (len & 1) {
-        sum += (uint16_t)data[len - 1] << 8;
-    }
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    return (uint16_t)~sum;
-}
-
-/**
- * Build a minimal IPv4 ICMP Echo Request packet.
- * Returns the total packet length, or 0 on error.
- */
-static size_t
-masque_build_icmp_echo(uint8_t *buf, size_t buflen,
-                       uint8_t src_ip[4], uint8_t dst_ip[4])
-{
-    /* IPv4 header (20) + ICMP echo (8) + 4 bytes data = 32 */
-    const size_t ip_hdr_len = 20;
-    const size_t icmp_len = 12;  /* 8 header + 4 data */
-    const size_t total = ip_hdr_len + icmp_len;
-
-    if (buflen < total) {
-        return 0;
-    }
-    memset(buf, 0, total);
-
-    /* IPv4 header */
-    buf[0] = 0x45;              /* Version=4, IHL=5 (20 bytes) */
-    buf[1] = 0x00;              /* DSCP/ECN */
-    buf[2] = (uint8_t)(total >> 8);
-    buf[3] = (uint8_t)(total & 0xFF);
-    buf[4] = 0x00; buf[5] = 0x01; /* Identification */
-    buf[6] = 0x00; buf[7] = 0x00; /* Flags + Fragment Offset */
-    buf[8] = 64;                /* TTL */
-    buf[9] = 1;                 /* Protocol: ICMP */
-    /* buf[10..11] = header checksum (computed below) */
-    memcpy(buf + 12, src_ip, 4);
-    memcpy(buf + 16, dst_ip, 4);
-
-    uint16_t ip_cksum = masque_ip_checksum(buf, ip_hdr_len);
-    buf[10] = (uint8_t)(ip_cksum >> 8);
-    buf[11] = (uint8_t)(ip_cksum & 0xFF);
-
-    /* ICMP Echo Request */
-    uint8_t *icmp = buf + ip_hdr_len;
-    icmp[0] = 8;                /* Type: Echo Request */
-    icmp[1] = 0;                /* Code */
-    /* icmp[2..3] = checksum (computed below) */
-    icmp[4] = 0x00; icmp[5] = 0x01; /* Identifier */
-    icmp[6] = 0x00; icmp[7] = 0x01; /* Sequence Number */
-    icmp[8] = 'T'; icmp[9] = 'E'; icmp[10] = 'S'; icmp[11] = 'T';
-
-    uint16_t icmp_cksum = masque_ip_checksum(icmp, icmp_len);
-    icmp[2] = (uint8_t)(icmp_cksum >> 8);
-    icmp[3] = (uint8_t)(icmp_cksum & 0xFF);
-
-    return total;
-}
+/* masque_ip_checksum() and masque_build_icmp_echo() are in masque_common.h */
 
 /* ──────────────────────────────────────────────────────────── */
 /*  CONNECT-IP: send ADDRESS_REQUEST capsule on H3 stream       */
@@ -497,13 +431,15 @@ masque_tunnel_send_ip_data(masque_tunnel_t *tun)
         return -1;
     }
 
-    printf("[masque] Sending ICMP echo: %u.%u.%u.%u -> %u.%u.%u.%u (%zu bytes)\n",
+    tun->send_count++;
+    printf("[masque] Sending ICMP echo [%d/%d]: %u.%u.%u.%u -> %u.%u.%u.%u (%zu bytes)\n",
+           tun->send_count, g_send_count,
            tun->assigned_ip[0], tun->assigned_ip[1],
            tun->assigned_ip[2], tun->assigned_ip[3],
            dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], ip_len);
 
     int ret = masque_tunnel_send_dgram(tun, ip_pkt, ip_len);
-    if (ret == 0) {
+    if (ret == 0 && tun->send_count >= g_send_count) {
         tun->send_done = 1;
     }
     return ret;
@@ -544,8 +480,9 @@ masque_dgram_read_cb(xqc_h3_conn_t *h3c, const void *data, size_t data_len,
 
     const uint8_t *payload = (const uint8_t *)data + pay_off;
 
-    printf("[masque] Received datagram: %zu bytes payload, ctx_id=%" PRIu64 "\n",
-           pay_len, ctx_id);
+    tun->recv_count++;
+    printf("[masque] Received datagram [%d/%d]: %zu bytes payload, ctx_id=%" PRIu64 "\n",
+           tun->recv_count, g_send_count, pay_len, ctx_id);
 
     /* Store received data */
     if (tun->recv_len + pay_len <= sizeof(tun->recv_buf)) {
@@ -566,19 +503,36 @@ masque_dgram_read_cb(xqc_h3_conn_t *h3c, const void *data, size_t data_len,
         } else {
             printf("[masque] IP packet: %zu bytes (too short for header)\n", pay_len);
         }
+
+        /* CONNECT-IP: send next ICMP echo if more to send */
+        if (!tun->send_done && tun->address_assigned) {
+            masque_tunnel_send_ip_data(tun);
+        }
     } else {
         /* CONNECT-UDP: payload is UDP data, print as string */
         if (pay_len > 0 && pay_len < 4096) {
             printf("[masque] Payload: %.*s\n", (int)pay_len, payload);
         }
+
+        /* CONNECT-UDP: send next datagram if more to send */
+        if (!tun->send_done) {
+            tun->send_count++;
+            printf("[masque] Sending datagram [%d/%d]\n",
+                   tun->send_count, g_send_count);
+            int ret = masque_tunnel_send_dgram(tun,
+                (const uint8_t *)tun->send_data, tun->send_data_len);
+            if (ret == 0 && tun->send_count >= g_send_count) {
+                tun->send_done = 1;
+            }
+        }
     }
 
-    tun->recv_done = 1;
-
-    /* For the test: after receiving a response, close the connection */
-    printf("[masque] Echo received, closing tunnel\n");
-    xqc_h3_request_close(tun->h3_request);
-    xqc_h3_conn_close(conn->ctx->engine, &conn->cid);
+    if (tun->recv_count >= g_send_count) {
+        tun->recv_done = 1;
+        printf("[masque] All %d echoes received, closing tunnel\n", tun->recv_count);
+        xqc_h3_request_close(tun->h3_request);
+        xqc_h3_conn_close(conn->ctx->engine, &conn->cid);
+    }
 }
 
 static void
@@ -591,11 +545,13 @@ masque_dgram_write_cb(xqc_h3_conn_t *h3c, void *user_data)
         return;
     }
 
-    if (tun->response_ok && !tun->send_done) {
+    if (tun->response_ok && !tun->send_done && !g_connect_ip) {
+        /* CONNECT-UDP: retry send if EAGAIN on prior attempt */
         printf("[masque] dgram_write: tunnel ready, sending data\n");
+        tun->send_count++;
         int ret = masque_tunnel_send_dgram(tun,
             (const uint8_t *)tun->send_data, tun->send_data_len);
-        if (ret == 0) {
+        if (ret == 0 && tun->send_count >= g_send_count) {
             tun->send_done = 1;
         }
     }
@@ -744,11 +700,14 @@ masque_h3_request_read_cb(xqc_h3_request_t *h3r,
                          * proactively (e.g. connect-ip-go). */
                         printf("[masque] Waiting for ADDRESS_ASSIGN...\n");
                     } else {
-                        /* CONNECT-UDP: send data immediately */
+                        /* CONNECT-UDP: send first datagram immediately */
                         if (!tun->send_done && tun->send_data && tun->send_data_len > 0) {
+                            tun->send_count++;
+                            printf("[masque] Sending datagram [%d/%d]\n",
+                                   tun->send_count, g_send_count);
                             int ret = masque_tunnel_send_dgram(tun,
                                 (const uint8_t *)tun->send_data, tun->send_data_len);
-                            if (ret == 0) {
+                            if (ret == 0 && tun->send_count >= g_send_count) {
                                 tun->send_done = 1;
                             }
                         }
@@ -1005,6 +964,7 @@ masque_usage(const char *prog)
            "  -T <host>    Target host for CONNECT-UDP (default: 127.0.0.1)\n"
            "  -P <port>    Target port for CONNECT-UDP (default: 9999)\n"
            "  -d <data>    Data to send through tunnel (default: 'Hello MASQUE!')\n"
+           "  -n <count>   Number of datagrams/echoes to send (default: 1)\n"
            "  -U <path>    Override URI template path\n"
            "  -I           Use CONNECT-IP mode (instead of CONNECT-UDP)\n"
            "  -S           Allow self-signed certificates\n"
@@ -1018,7 +978,7 @@ int
 main(int argc, char *argv[])
 {
     int opt;
-    while ((opt = getopt(argc, argv, "a:p:H:T:P:d:U:ISkl:h")) != -1) {
+    while ((opt = getopt(argc, argv, "a:p:H:T:P:d:n:U:ISkl:h")) != -1) {
         switch (opt) {
         case 'a': strncpy(g_proxy_addr, optarg, sizeof(g_proxy_addr) - 1); break;
         case 'p': g_proxy_port = atoi(optarg); break;
@@ -1026,6 +986,7 @@ main(int argc, char *argv[])
         case 'T': strncpy(g_target_host, optarg, sizeof(g_target_host) - 1); break;
         case 'P': g_target_port = atoi(optarg); break;
         case 'd': strncpy(g_send_data, optarg, sizeof(g_send_data) - 1); break;
+        case 'n': g_send_count = atoi(optarg); break;
         case 'U': strncpy(g_uri_path, optarg, sizeof(g_uri_path) - 1); break;
         case 'I': g_connect_ip = 1; break;
         case 'S': g_allow_self_signed = 1; break;
@@ -1192,9 +1153,11 @@ main(int argc, char *argv[])
     printf("[masque] Event loop exited\n");
 
     if (tunnel.recv_done) {
-        printf("[masque] SUCCESS: Received %zu bytes through tunnel\n", tunnel.recv_len);
+        printf("[masque] SUCCESS: sent=%d recv=%d (%zu bytes total)\n",
+               tunnel.send_count, tunnel.recv_count, tunnel.recv_len);
     } else {
-        printf("[masque] No data received through tunnel\n");
+        printf("[masque] FAIL: sent=%d recv=%d (expected %d)\n",
+               tunnel.send_count, tunnel.recv_count, g_send_count);
     }
 
     event_free(conn.ev_socket);

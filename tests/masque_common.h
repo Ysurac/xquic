@@ -443,4 +443,77 @@ masque_parse_route_advertisement(const uint8_t *payload, size_t paylen,
     return 0;
 }
 
+/**
+ * IPv4 header / ICMP checksum (RFC 1071).
+ * Computes the ones' complement of the ones' complement sum.
+ */
+static inline uint16_t
+masque_ip_checksum(const uint8_t *data, size_t len)
+{
+    uint32_t sum = 0;
+    for (size_t i = 0; i + 1 < len; i += 2) {
+        sum += ((uint16_t)data[i] << 8) | data[i + 1];
+    }
+    if (len & 1) {
+        sum += (uint16_t)data[len - 1] << 8;
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return (uint16_t)~sum;
+}
+
+/**
+ * Build a minimal IPv4 ICMP Echo Request packet.
+ * Returns the total packet length (32), or 0 on error.
+ *
+ * @param buf     output buffer (must be >= 32 bytes)
+ * @param buflen  output buffer capacity
+ * @param src_ip  source IPv4 address (4 bytes)
+ * @param dst_ip  destination IPv4 address (4 bytes)
+ */
+static inline size_t
+masque_build_icmp_echo(uint8_t *buf, size_t buflen,
+                       const uint8_t src_ip[4], const uint8_t dst_ip[4])
+{
+    const size_t ip_hdr_len = 20;
+    const size_t icmp_len = 12;  /* 8 header + 4 data */
+    const size_t total = ip_hdr_len + icmp_len;
+
+    if (buflen < total) {
+        return 0;
+    }
+    memset(buf, 0, total);
+
+    /* IPv4 header */
+    buf[0] = 0x45;              /* Version=4, IHL=5 (20 bytes) */
+    buf[1] = 0x00;              /* DSCP/ECN */
+    buf[2] = (uint8_t)(total >> 8);
+    buf[3] = (uint8_t)(total & 0xFF);
+    buf[4] = 0x00; buf[5] = 0x01; /* Identification */
+    buf[6] = 0x00; buf[7] = 0x00; /* Flags + Fragment Offset */
+    buf[8] = 64;                /* TTL */
+    buf[9] = 1;                 /* Protocol: ICMP */
+    memcpy(buf + 12, src_ip, 4);
+    memcpy(buf + 16, dst_ip, 4);
+
+    uint16_t ip_cksum = masque_ip_checksum(buf, ip_hdr_len);
+    buf[10] = (uint8_t)(ip_cksum >> 8);
+    buf[11] = (uint8_t)(ip_cksum & 0xFF);
+
+    /* ICMP Echo Request */
+    uint8_t *icmp = buf + ip_hdr_len;
+    icmp[0] = 8;                /* Type: Echo Request */
+    icmp[1] = 0;                /* Code */
+    icmp[4] = 0x00; icmp[5] = 0x01; /* Identifier */
+    icmp[6] = 0x00; icmp[7] = 0x01; /* Sequence Number */
+    icmp[8] = 'T'; icmp[9] = 'E'; icmp[10] = 'S'; icmp[11] = 'T';
+
+    uint16_t icmp_cksum = masque_ip_checksum(icmp, icmp_len);
+    icmp[2] = (uint8_t)(icmp_cksum >> 8);
+    icmp[3] = (uint8_t)(icmp_cksum & 0xFF);
+
+    return total;
+}
+
 #endif /* MASQUE_COMMON_H */
