@@ -125,6 +125,7 @@ static int      g_log_level             = MASQUE_DEFAULT_LOG_LEVEL;
 static char     g_proxy_host[256]       = "";  /* SNI host, defaults to proxy_addr */
 static char     g_uri_path[1024]        = "";  /* override .well-known URI template */
 static int      g_allow_self_signed     = 0;   /* -S: accept self-signed certs */
+static int      g_connect_ip            = 0;   /* -I: use CONNECT-IP instead of CONNECT-UDP */
 
 /* ──────────────────────────────────────────────────────────── */
 /*  Forward declarations                                        */
@@ -246,10 +247,13 @@ masque_tunnel_send_headers(masque_tunnel_t *tun)
         return 0;
     }
 
-    /* Build URI path: /.well-known/masque/udp/{host}/{port}/ */
+    /* Build URI path */
     char path[1024];
     if (g_uri_path[0] != '\0') {
         snprintf(path, sizeof(path), "%s", g_uri_path);
+    } else if (g_connect_ip) {
+        snprintf(path, sizeof(path), "/.well-known/masque/ip/%s/%d/",
+                 tun->target_host, tun->target_port);
     } else {
         snprintf(path, sizeof(path), "/.well-known/masque/udp/%s/%d/",
                  tun->target_host, tun->target_port);
@@ -265,7 +269,8 @@ masque_tunnel_send_headers(masque_tunnel_t *tun)
           .value = {.iov_base = "CONNECT",    .iov_len = 7},
           .flags = 0 },
         { .name  = {.iov_base = ":protocol",  .iov_len = 9},
-          .value = {.iov_base = "connect-udp", .iov_len = 11},
+          .value = {.iov_base = g_connect_ip ? "connect-ip" : "connect-udp",
+                    .iov_len  = g_connect_ip ? 10 : 11},
           .flags = 0 },
         { .name  = {.iov_base = ":scheme",    .iov_len = 7},
           .value = {.iov_base = "https",       .iov_len = 5},
@@ -344,6 +349,39 @@ masque_tunnel_send_dgram(masque_tunnel_t *tun, const uint8_t *data, size_t len)
 
     printf("[masque] Sent datagram: %zu bytes payload, dgram_id=%" PRIu64 "\n",
            len, dgram_id);
+    return 0;
+}
+
+/* ──────────────────────────────────────────────────────────── */
+/*  Tunnel: send IP payload via Capsule Protocol (CONNECT-IP)   */
+/* ──────────────────────────────────────────────────────────── */
+
+static int
+masque_tunnel_send_capsule(masque_tunnel_t *tun, const uint8_t *data, size_t len)
+{
+    if (!tun->response_ok) {
+        printf("[masque] Cannot send capsule: tunnel not established\n");
+        return -1;
+    }
+
+    /* Encode as DATAGRAM capsule (type=0x00) on the H3 stream body */
+    uint8_t capsule_buf[65536];
+    size_t cap_len = masque_capsule_encode(
+        capsule_buf, sizeof(capsule_buf),
+        MASQUE_CAPSULE_DATAGRAM, data, len);
+    if (cap_len == 0) {
+        printf("[masque] Failed to encode capsule (too large?)\n");
+        return -1;
+    }
+
+    ssize_t ret = xqc_h3_request_send_body(tun->h3_request,
+                                            capsule_buf, cap_len, 0);
+    if (ret < 0) {
+        printf("[masque] capsule send error: %zd\n", ret);
+        return (int)ret;
+    }
+
+    printf("[masque] Sent capsule: type=DATAGRAM, %zu bytes payload\n", len);
     return 0;
 }
 
@@ -487,7 +525,7 @@ masque_h3_handshake_finished_cb(xqc_h3_conn_t *h3c, void *user_data)
     conn->connected = 1;
     printf("[masque] H3 handshake finished\n");
 
-    /* Now open the CONNECT-UDP tunnel */
+    /* Now open the CONNECT tunnel */
     masque_tunnel_t *tun = conn->tunnel;
     if (tun && !tun->headers_sent) {
         /* Create H3 request for the tunnel */
@@ -557,31 +595,93 @@ masque_h3_request_read_cb(xqc_h3_request_t *h3r,
                 int status = atoi((const char *)headers->headers[i].value.iov_base);
                 if (status >= 200 && status < 300) {
                     tun->response_ok = 1;
-                    printf("[masque] CONNECT-UDP tunnel established! (status=%d)\n",
-                           status);
+                    printf("[masque] %s tunnel established! (status=%d)\n",
+                           g_connect_ip ? "CONNECT-IP" : "CONNECT-UDP", status);
 
                     /* Send the test payload */
                     if (!tun->send_done && tun->send_data && tun->send_data_len > 0) {
-                        int ret = masque_tunnel_send_dgram(tun,
-                            (const uint8_t *)tun->send_data, tun->send_data_len);
+                        int ret;
+                        if (g_connect_ip) {
+                            ret = masque_tunnel_send_capsule(tun,
+                                (const uint8_t *)tun->send_data, tun->send_data_len);
+                        } else {
+                            ret = masque_tunnel_send_dgram(tun,
+                                (const uint8_t *)tun->send_data, tun->send_data_len);
+                        }
                         if (ret == 0) {
                             tun->send_done = 1;
                         }
                     }
                 } else {
-                    printf("[masque] Proxy rejected CONNECT-UDP: status=%d\n", status);
+                    printf("[masque] Proxy rejected %s: status=%d\n",
+                           g_connect_ip ? "CONNECT-IP" : "CONNECT-UDP", status);
                 }
             }
         }
     }
 
     if (flag & XQC_REQ_NOTIFY_READ_BODY) {
-        /* Capsule data on the DATA stream (fallback path, not primary for CONNECT-UDP) */
-        uint8_t body_buf[4096];
+        uint8_t body_buf[65536];
         uint8_t fin = 0;
         ssize_t n = xqc_h3_request_recv_body(h3r, body_buf, sizeof(body_buf), &fin);
         if (n > 0) {
-            printf("[masque] Received %zd bytes on DATA stream (capsule?)\n", n);
+            if (g_connect_ip) {
+                /* Parse received capsules */
+                size_t off = 0;
+                while (off < (size_t)n) {
+                    uint64_t cap_type;
+                    size_t pay_off, pay_len;
+                    int rc = masque_capsule_decode(body_buf + off, (size_t)n - off,
+                                                   &cap_type, &pay_off, &pay_len);
+                    if (rc < 0) {
+                        printf("[masque] Failed to decode capsule at offset %zu\n", off);
+                        break;
+                    }
+                    size_t cap_total = pay_off + pay_len;
+                    if (off + cap_total > (size_t)n) {
+                        printf("[masque] Incomplete capsule at offset %zu\n", off);
+                        break;
+                    }
+
+                    printf("[masque] Capsule: type=%" PRIu64 ", payload=%zu bytes\n",
+                           cap_type, pay_len);
+
+                    if (cap_type == MASQUE_CAPSULE_ADDRESS_ASSIGN && pay_len > 0) {
+                        uint64_t req_id;
+                        uint8_t ip_ver, ip_addr[16], pfx_len;
+                        size_t ip_addr_len;
+                        if (masque_parse_address_assign(
+                                body_buf + off + pay_off, pay_len,
+                                &req_id, &ip_ver, ip_addr, &ip_addr_len, &pfx_len) == 0) {
+                            if (ip_ver == 4) {
+                                printf("[masque] ADDRESS_ASSIGN: req_id=%" PRIu64
+                                       " IPv4=%u.%u.%u.%u/%u\n",
+                                       req_id, ip_addr[0], ip_addr[1],
+                                       ip_addr[2], ip_addr[3], pfx_len);
+                            } else {
+                                printf("[masque] ADDRESS_ASSIGN: req_id=%" PRIu64
+                                       " IPv6=.../%u\n", req_id, pfx_len);
+                            }
+                        }
+                    } else if (cap_type == MASQUE_CAPSULE_DATAGRAM && pay_len > 0) {
+                        printf("[masque] Capsule payload: %.*s\n",
+                               (int)pay_len, body_buf + off + pay_off);
+                        tun->recv_done = 1;
+                    }
+
+                    off += cap_total;
+                }
+            } else {
+                printf("[masque] Received %zd bytes on DATA stream\n", n);
+            }
+        }
+        if (fin) {
+            printf("[masque] Stream FIN received\n");
+            if (g_connect_ip && tun->recv_done) {
+                printf("[masque] CONNECT-IP: data received, closing\n");
+                xqc_h3_request_close(tun->h3_request);
+                xqc_h3_conn_close(conn->ctx->engine, &conn->cid);
+            }
         }
     }
 
@@ -732,6 +832,7 @@ masque_usage(const char *prog)
            "  -P <port>    Target port for CONNECT-UDP (default: 9999)\n"
            "  -d <data>    Data to send through tunnel (default: 'Hello MASQUE!')\n"
            "  -U <path>    Override URI template path\n"
+           "  -I           Use CONNECT-IP mode (instead of CONNECT-UDP)\n"
            "  -S           Allow self-signed certificates\n"
            "  -k           No encryption (testing only)\n"
            "  -l <level>   Log level 0-5 (default: %d)\n"
@@ -743,7 +844,7 @@ int
 main(int argc, char *argv[])
 {
     int opt;
-    while ((opt = getopt(argc, argv, "a:p:H:T:P:d:U:Skl:h")) != -1) {
+    while ((opt = getopt(argc, argv, "a:p:H:T:P:d:U:ISkl:h")) != -1) {
         switch (opt) {
         case 'a': strncpy(g_proxy_addr, optarg, sizeof(g_proxy_addr) - 1); break;
         case 'p': g_proxy_port = atoi(optarg); break;
@@ -752,6 +853,7 @@ main(int argc, char *argv[])
         case 'P': g_target_port = atoi(optarg); break;
         case 'd': strncpy(g_send_data, optarg, sizeof(g_send_data) - 1); break;
         case 'U': strncpy(g_uri_path, optarg, sizeof(g_uri_path) - 1); break;
+        case 'I': g_connect_ip = 1; break;
         case 'S': g_allow_self_signed = 1; break;
         case 'k': g_no_crypto = 1; break;
         case 'l': g_log_level = atoi(optarg); break;
@@ -893,6 +995,7 @@ main(int argc, char *argv[])
 
     const char *sni = g_proxy_host[0] ? g_proxy_host : g_proxy_addr;
 
+    printf("[masque] Mode: %s\n", g_connect_ip ? "CONNECT-IP" : "CONNECT-UDP");
     printf("[masque] Connecting to proxy %s:%d (SNI: %s)\n",
            g_proxy_addr, g_proxy_port, sni);
     printf("[masque] Target: %s:%d\n", g_target_host, g_target_port);
