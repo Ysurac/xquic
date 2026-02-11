@@ -999,10 +999,22 @@ xqc_int_t xqc_h3_ext_datagram_send(xqc_h3_conn_t *conn, void *data,
  *         0 success
  */
 XQC_EXPORT_PUBLIC_API
-xqc_int_t xqc_h3_ext_datagram_send_multiple(xqc_h3_conn_t *conn, 
-    struct iovec *iov, uint64_t *dgram_id_list, size_t iov_size, 
+xqc_int_t xqc_h3_ext_datagram_send_multiple(xqc_h3_conn_t *conn,
+    struct iovec *iov, uint64_t *dgram_id_list, size_t iov_size,
     size_t *sent_cnt, size_t *sent_bytes,
     xqc_data_qos_level_t qos_level);
+
+/**
+ * @brief send a datagram pinned to a specific path (multipath QUIC)
+ *
+ * Same as xqc_h3_ext_datagram_send but the datagram packet is pinned to the
+ * given path_id, bypassing the multipath scheduler.
+ * Use XQC_INITIAL_PATH_ID (0) for the initial path.
+ */
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_h3_ext_datagram_send_on_path(xqc_h3_conn_t *conn, void *data,
+    size_t data_len, uint64_t *dgram_id, xqc_data_qos_level_t qos_level,
+    uint64_t path_id);
 
 
 /* ── MASQUE Protocol Helpers (RFC 9297 / RFC 9298 / RFC 9484) ──

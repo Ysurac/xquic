@@ -2090,9 +2090,29 @@ xqc_int_t xqc_datagram_send(xqc_connection_t *conn, void *data,
  *         0 success
  */
 XQC_EXPORT_PUBLIC_API
-xqc_int_t xqc_datagram_send_multiple(xqc_connection_t *conn, 
-    struct iovec *iov, uint64_t *dgram_id_list, size_t iov_size, 
+xqc_int_t xqc_datagram_send_multiple(xqc_connection_t *conn,
+    struct iovec *iov, uint64_t *dgram_id_list, size_t iov_size,
     size_t *sent_cnt, size_t *sent_bytes, xqc_data_qos_level_t qos_level);
+
+/**
+ * @brief send a datagram pinned to a specific path (multipath QUIC)
+ *
+ * Same as xqc_datagram_send but the datagram packet is pinned to the
+ * given path_id, bypassing the multipath scheduler.
+ * Use XQC_INITIAL_PATH_ID (0) for the initial path.
+ *
+ * @param conn the connection handle
+ * @param data the data to be sent
+ * @param data_len the length of the data
+ * @param dgram_id pointer to return the id of the datagram
+ * @param qos_level QoS level (must be the values defined in xqc_data_qos_level_t)
+ * @param path_id the path to pin this datagram to
+ * @return <0 = error, 0 = success
+ */
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_datagram_send_on_path(xqc_connection_t *conn, void *data,
+    size_t data_len, uint64_t *dgram_id, xqc_data_qos_level_t qos_level,
+    uint64_t path_id);
 
 
 /**
