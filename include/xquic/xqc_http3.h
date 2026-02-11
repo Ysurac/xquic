@@ -1005,6 +1005,90 @@ xqc_int_t xqc_h3_ext_datagram_send_multiple(xqc_h3_conn_t *conn,
     xqc_data_qos_level_t qos_level);
 
 
+/* ── MASQUE Protocol Helpers (RFC 9297 / RFC 9298 / RFC 9484) ──
+ *
+ * Stateless framing utilities for MASQUE CONNECT-UDP and CONNECT-IP.
+ * These functions do not depend on connection or path objects,
+ * making them safe for use with multipath QUIC.
+ */
+
+/* Capsule type constants */
+#define XQC_H3_CAPSULE_DATAGRAM              0x00
+#define XQC_H3_CAPSULE_ADDRESS_ASSIGN        0x01
+#define XQC_H3_CAPSULE_ADDRESS_REQUEST       0x02
+#define XQC_H3_CAPSULE_ROUTE_ADVERTISEMENT   0x03
+
+/**
+ * Frame a UDP/IP payload into an HTTP Datagram buffer (RFC 9297).
+ * Prepends [Quarter-Stream-ID : varint][Context-ID=0 : varint].
+ */
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_h3_ext_masque_frame_udp(
+    uint8_t *out, size_t outlen, size_t *written,
+    uint64_t stream_id, const uint8_t *payload, size_t paylen);
+
+/**
+ * Unframe an HTTP Datagram (RFC 9297).
+ * Returns a pointer to the payload within the input buffer.
+ */
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_h3_ext_masque_unframe_udp(
+    const uint8_t *buf, size_t buflen,
+    uint64_t *quarter_stream_id, uint64_t *context_id,
+    const uint8_t **payload, size_t *payload_len);
+
+/**
+ * Calculate the maximum payload size for a single HTTP Datagram.
+ */
+XQC_EXPORT_PUBLIC_API
+size_t xqc_h3_ext_masque_udp_mss(size_t dgram_mss, uint64_t stream_id);
+
+/**
+ * Encode a capsule: [Type : varint][Length : varint][Payload] (RFC 9297).
+ */
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_h3_ext_capsule_encode(
+    uint8_t *out, size_t outlen, size_t *written,
+    uint64_t type, const uint8_t *payload, size_t paylen);
+
+/**
+ * Decode a capsule header and return a pointer to the payload (RFC 9297).
+ */
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_h3_ext_capsule_decode(
+    const uint8_t *buf, size_t buflen,
+    uint64_t *type, const uint8_t **payload, size_t *payload_len,
+    size_t *bytes_consumed);
+
+/**
+ * Parse an ADDRESS_ASSIGN capsule payload (RFC 9484).
+ */
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_h3_ext_connectip_parse_address_assign(
+    const uint8_t *payload, size_t paylen,
+    uint64_t *request_id, uint8_t *ip_version,
+    uint8_t *ip_addr, size_t *ip_addr_len, uint8_t *prefix_len);
+
+/**
+ * Build an ADDRESS_REQUEST capsule payload (RFC 9484).
+ */
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_h3_ext_connectip_build_address_request(
+    uint8_t *buf, size_t buflen, size_t *written,
+    uint64_t request_id, uint8_t ip_version,
+    const uint8_t *ip_addr, uint8_t prefix_len);
+
+/**
+ * Parse a single ROUTE_ADVERTISEMENT entry (RFC 9484).
+ * Call in a loop, advancing by bytes_consumed each iteration.
+ */
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_h3_ext_connectip_parse_route_advertisement(
+    const uint8_t *payload, size_t paylen,
+    uint8_t *ip_version, uint8_t *start_ip, uint8_t *end_ip,
+    size_t *ip_addr_len, uint8_t *ip_protocol, size_t *bytes_consumed);
+
+
 #ifdef __cplusplus
 }
 #endif

@@ -202,6 +202,7 @@ set(
     "src/http3/qpack/dtable/xqc_dtable.c"
     "src/http3/xqc_h3_ext_dgram.c"
     "src/http3/xqc_h3_ext_bytestream.c"
+    "src/http3/xqc_h3_ext_masque.c"
 )
 
 # Transport source
