@@ -68,6 +68,7 @@ struct masque_ctx_s {
     xqc_engine_t           *engine;
     struct event_base      *eb;
     struct event           *ev_engine;     /* timer for xqc_engine_main_logic */
+    struct event           *ev_sigint;     /* SIGINT handler */
     int                     log_fd;
 };
 
@@ -122,6 +123,12 @@ struct masque_tunnel_s {
     size_t                  assigned_ip_len;
     uint8_t                 assigned_prefix;
     int                     address_assigned;  /* ADDRESS_ASSIGN received */
+
+    /* statistics */
+    xqc_usec_t              first_send_time;   /* timestamp of first datagram sent */
+    xqc_usec_t              last_recv_time;     /* timestamp of last datagram received */
+    int                     dgram_acked;       /* datagrams ACKed */
+    int                     dgram_lost;        /* datagrams reported lost */
 };
 
 /* ──────────────────────────────────────────────────────────── */
@@ -140,6 +147,8 @@ static char     g_uri_path[1024]        = "";  /* override .well-known URI templ
 static int      g_allow_self_signed     = 0;   /* -S: accept self-signed certs */
 static int      g_connect_ip            = 0;   /* -I: use CONNECT-IP instead of CONNECT-UDP */
 static int      g_send_count            = 1;   /* -n: number of datagrams/echoes to send */
+static int      g_timeout_sec           = 30;  /* -t: idle timeout in seconds */
+static int      g_quiet                 = 0;   /* -q: quiet mode (summary only) */
 
 /* ──────────────────────────────────────────────────────────── */
 /*  Forward declarations                                        */
@@ -148,6 +157,7 @@ static int      g_send_count            = 1;   /* -n: number of datagrams/echoes
 static void masque_engine_cb(int fd, short what, void *arg);
 static void masque_socket_read_cb(int fd, short what, void *arg);
 static void masque_timeout_cb(int fd, short what, void *arg);
+static void masque_sigint_cb(int fd, short what, void *arg);
 
 /* ──────────────────────────────────────────────────────────── */
 /*  Logging                                                     */
@@ -183,6 +193,44 @@ masque_engine_cb(int fd, short what, void *arg)
 {
     masque_ctx_t *ctx = (masque_ctx_t *)arg;
     xqc_engine_main_logic(ctx->engine);
+}
+
+static void
+masque_sigint_cb(int sig, short what, void *arg)
+{
+    masque_ctx_t *ctx = (masque_ctx_t *)arg;
+    printf("\n[masque] SIGINT received, shutting down gracefully...\n");
+    event_base_loopbreak(ctx->eb);
+}
+
+static void
+masque_print_stats(masque_tunnel_t *tun)
+{
+    printf("\n── Statistics ──\n");
+    printf("  Mode:       %s\n", g_connect_ip ? "CONNECT-IP" : "CONNECT-UDP");
+    printf("  Sent:       %d / %d datagrams\n", tun->send_count, g_send_count);
+    printf("  Received:   %d / %d datagrams\n", tun->recv_count, g_send_count);
+    printf("  ACKed:      %d\n", tun->dgram_acked);
+    printf("  Lost:       %d\n", tun->dgram_lost);
+
+    if (tun->send_count > 0) {
+        double loss_pct = tun->dgram_lost * 100.0 / tun->send_count;
+        printf("  Loss rate:  %.1f%%\n", loss_pct);
+    }
+
+    if (tun->first_send_time > 0 && tun->last_recv_time > tun->first_send_time) {
+        double elapsed_ms = (tun->last_recv_time - tun->first_send_time) / 1000.0;
+        printf("  Duration:   %.1f ms\n", elapsed_ms);
+        if (tun->recv_count > 0 && tun->recv_len > 0) {
+            double throughput_kbps = (tun->recv_len * 8.0) / elapsed_ms;
+            printf("  Throughput: %.1f kbps (recv payload)\n", throughput_kbps);
+        }
+        if (tun->recv_count > 1) {
+            double avg_rtt_ms = elapsed_ms / tun->recv_count;
+            printf("  Avg RTT:    %.1f ms (approx, send-to-recv)\n", avg_rtt_ms);
+        }
+    }
+    printf("────────────────\n");
 }
 
 /* ──────────────────────────────────────────────────────────── */
@@ -354,15 +402,21 @@ masque_tunnel_send_dgram(masque_tunnel_t *tun, const uint8_t *data, size_t len)
         conn->h3_conn, framed, framed_len, &dgram_id, XQC_DATA_QOS_HIGH);
     if (ret < 0) {
         if (ret == -XQC_EAGAIN) {
-            printf("[masque] datagram send EAGAIN, will retry\n");
+            if (!g_quiet) printf("[masque] datagram send EAGAIN, will retry\n");
             return -XQC_EAGAIN;
         }
         printf("[masque] datagram send error: %d\n", ret);
         return ret;
     }
 
-    printf("[masque] Sent datagram: %zu bytes payload, dgram_id=%" PRIu64 "\n",
-           len, dgram_id);
+    if (tun->first_send_time == 0) {
+        tun->first_send_time = xqc_now();
+    }
+
+    if (!g_quiet) {
+        printf("[masque] Sent datagram: %zu bytes payload, dgram_id=%" PRIu64 "\n",
+               len, dgram_id);
+    }
     return 0;
 }
 
@@ -483,8 +537,13 @@ masque_dgram_read_cb(xqc_h3_conn_t *h3c, const void *data, size_t data_len,
     const uint8_t *payload = (const uint8_t *)data + pay_off;
 
     tun->recv_count++;
-    printf("[masque] Received datagram [%d/%d]: %zu bytes payload, ctx_id=%" PRIu64 "\n",
-           tun->recv_count, g_send_count, pay_len, ctx_id);
+    tun->last_recv_time = xqc_now();
+    if (!g_quiet) {
+        printf("[masque] Received datagram [%d/%d]: %zu bytes payload, ctx_id=%" PRIu64 "\n",
+               tun->recv_count, g_send_count, pay_len, ctx_id);
+    } else if (tun->recv_count % 100 == 0 || tun->recv_count == g_send_count) {
+        printf("[masque] Progress: %d/%d received\n", tun->recv_count, g_send_count);
+    }
 
     /* Store received data */
     if (tun->recv_len + pay_len <= sizeof(tun->recv_buf)) {
@@ -494,7 +553,7 @@ masque_dgram_read_cb(xqc_h3_conn_t *h3c, const void *data, size_t data_len,
 
     if (g_connect_ip) {
         /* CONNECT-IP: payload is an IP packet, show header info */
-        if (pay_len >= 20) {
+        if (!g_quiet && pay_len >= 20) {
             uint8_t version = payload[0] >> 4;
             uint8_t proto = payload[9];
             printf("[masque] IP packet: version=%u, proto=%u, "
@@ -502,8 +561,6 @@ masque_dgram_read_cb(xqc_h3_conn_t *h3c, const void *data, size_t data_len,
                    version, proto,
                    payload[12], payload[13], payload[14], payload[15],
                    payload[16], payload[17], payload[18], payload[19]);
-        } else {
-            printf("[masque] IP packet: %zu bytes (too short for header)\n", pay_len);
         }
 
         /* CONNECT-IP: send next ICMP echo if more to send */
@@ -512,14 +569,16 @@ masque_dgram_read_cb(xqc_h3_conn_t *h3c, const void *data, size_t data_len,
         }
     } else {
         /* CONNECT-UDP: payload is UDP data, print as string */
-        if (pay_len > 0 && pay_len < 4096) {
+        if (!g_quiet && pay_len > 0 && pay_len < 4096) {
             printf("[masque] Payload: %.*s\n", (int)pay_len, payload);
         }
 
         /* CONNECT-UDP: send next datagram if more to send */
         if (!tun->send_done) {
-            printf("[masque] Sending datagram [%d/%d]\n",
-                   tun->send_count + 1, g_send_count);
+            if (!g_quiet) {
+                printf("[masque] Sending datagram [%d/%d]\n",
+                       tun->send_count + 1, g_send_count);
+            }
             int ret = masque_tunnel_send_dgram(tun,
                 (const uint8_t *)tun->send_data, tun->send_data_len);
             if (ret == 0) {
@@ -551,7 +610,7 @@ masque_dgram_write_cb(xqc_h3_conn_t *h3c, void *user_data)
 
     if (tun->response_ok && !tun->send_done && !g_connect_ip) {
         /* CONNECT-UDP: retry send if EAGAIN on prior attempt */
-        printf("[masque] dgram_write: tunnel ready, sending data\n");
+        if (!g_quiet) printf("[masque] dgram_write: tunnel ready, sending data\n");
         int ret = masque_tunnel_send_dgram(tun,
             (const uint8_t *)tun->send_data, tun->send_data_len);
         if (ret == 0) {
@@ -579,12 +638,22 @@ masque_dgram_mss_cb(xqc_h3_conn_t *h3c, size_t mss, void *user_data)
 static void
 masque_dgram_acked_cb(xqc_h3_conn_t *h3c, uint64_t dgram_id, void *user_data)
 {
-    printf("[masque] Datagram acked: dgram_id=%" PRIu64 "\n", dgram_id);
+    masque_conn_t *conn = (masque_conn_t *)user_data;
+    if (conn->tunnel) {
+        conn->tunnel->dgram_acked++;
+    }
+    if (!g_quiet) {
+        printf("[masque] Datagram acked: dgram_id=%" PRIu64 "\n", dgram_id);
+    }
 }
 
 static int
 masque_dgram_lost_cb(xqc_h3_conn_t *h3c, uint64_t dgram_id, void *user_data)
 {
+    masque_conn_t *conn = (masque_conn_t *)user_data;
+    if (conn->tunnel) {
+        conn->tunnel->dgram_lost++;
+    }
     printf("[masque] Datagram lost: dgram_id=%" PRIu64 "\n", dgram_id);
     return 0;  /* don't retransmit */
 }
@@ -612,7 +681,13 @@ masque_h3_conn_close_cb(xqc_h3_conn_t *h3c, const xqc_cid_t *cid,
                         void *user_data)
 {
     masque_conn_t *conn = (masque_conn_t *)user_data;
-    printf("[masque] H3 connection closed\n");
+
+    xqc_int_t err = xqc_h3_conn_get_errno(h3c);
+    if (err == 0) {
+        printf("[masque] H3 connection closed (clean)\n");
+    } else {
+        printf("[masque] H3 connection closed with error: %d\n", (int)err);
+    }
 
     /* Stop event loop */
     event_base_loopbreak(conn->ctx->eb);
@@ -708,8 +783,10 @@ masque_h3_request_read_cb(xqc_h3_request_t *h3r,
                     } else {
                         /* CONNECT-UDP: send first datagram immediately */
                         if (!tun->send_done && tun->send_data && tun->send_data_len > 0) {
-                            printf("[masque] Sending datagram [%d/%d]\n",
-                                   tun->send_count + 1, g_send_count);
+                            if (!g_quiet) {
+                                printf("[masque] Sending datagram [%d/%d]\n",
+                                       tun->send_count + 1, g_send_count);
+                            }
                             int ret = masque_tunnel_send_dgram(tun,
                                 (const uint8_t *)tun->send_data, tun->send_data_len);
                             if (ret == 0) {
@@ -723,6 +800,9 @@ masque_h3_request_read_cb(xqc_h3_request_t *h3r,
                 } else {
                     printf("[masque] Proxy rejected %s: status=%d\n",
                            g_connect_ip ? "CONNECT-IP" : "CONNECT-UDP", status);
+                    /* Close connection on rejection */
+                    xqc_h3_conn_close(conn->ctx->engine, &conn->cid);
+                    return 0;
                 }
             }
         }
@@ -973,9 +1053,11 @@ masque_usage(const char *prog)
            "  -P <port>    Target port for CONNECT-UDP (default: 9999)\n"
            "  -d <data>    Data to send through tunnel (default: 'Hello MASQUE!')\n"
            "  -n <count>   Number of datagrams/echoes to send (default: 1)\n"
+           "  -t <sec>     Idle timeout in seconds (default: 30)\n"
            "  -U <path>    Override URI template path\n"
            "  -I           Use CONNECT-IP mode (instead of CONNECT-UDP)\n"
            "  -S           Allow self-signed certificates\n"
+           "  -q           Quiet mode (summary statistics only)\n"
            "  -k           No encryption (testing only)\n"
            "  -l <level>   Log level 0-5 (default: %d)\n"
            "  -h           Show this help\n",
@@ -986,7 +1068,7 @@ int
 main(int argc, char *argv[])
 {
     int opt;
-    while ((opt = getopt(argc, argv, "a:p:H:T:P:d:n:U:ISkl:h")) != -1) {
+    while ((opt = getopt(argc, argv, "a:p:H:T:P:d:n:t:U:ISqkl:h")) != -1) {
         switch (opt) {
         case 'a': strncpy(g_proxy_addr, optarg, sizeof(g_proxy_addr) - 1); break;
         case 'p': g_proxy_port = atoi(optarg); break;
@@ -995,9 +1077,11 @@ main(int argc, char *argv[])
         case 'P': g_target_port = atoi(optarg); break;
         case 'd': strncpy(g_send_data, optarg, sizeof(g_send_data) - 1); break;
         case 'n': g_send_count = atoi(optarg); break;
+        case 't': g_timeout_sec = atoi(optarg); break;
         case 'U': strncpy(g_uri_path, optarg, sizeof(g_uri_path) - 1); break;
         case 'I': g_connect_ip = 1; break;
         case 'S': g_allow_self_signed = 1; break;
+        case 'q': g_quiet = 1; break;
         case 'k': g_no_crypto = 1; break;
         case 'l': g_log_level = atoi(optarg); break;
         case 'h':
@@ -1006,6 +1090,9 @@ main(int argc, char *argv[])
             return opt == 'h' ? 0 : 1;
         }
     }
+
+    if (g_send_count < 1) g_send_count = 1;
+    if (g_timeout_sec < 1) g_timeout_sec = 1;
 
     xqc_platform_init_env();
     signal(SIGPIPE, SIG_IGN);
@@ -1023,6 +1110,10 @@ main(int argc, char *argv[])
 
     /* ── Engine timer ── */
     ctx.ev_engine = event_new(ctx.eb, -1, 0, masque_engine_cb, &ctx);
+
+    /* ── SIGINT handler for graceful shutdown ── */
+    ctx.ev_sigint = evsignal_new(ctx.eb, SIGINT, masque_sigint_cb, &ctx);
+    event_add(ctx.ev_sigint, NULL);
 
     /* ── Engine callbacks ── */
     xqc_engine_callback_t engine_cbs = {
@@ -1111,9 +1202,9 @@ main(int argc, char *argv[])
                                masque_socket_read_cb, &conn);
     event_add(conn.ev_socket, NULL);
 
-    /* Idle timeout (30 seconds) */
+    /* Idle timeout */
     conn.ev_timeout = event_new(ctx.eb, -1, 0, masque_timeout_cb, &conn);
-    struct timeval tv_timeout = { .tv_sec = 30, .tv_usec = 0 };
+    struct timeval tv_timeout = { .tv_sec = g_timeout_sec, .tv_usec = 0 };
     event_add(conn.ev_timeout, &tv_timeout);
 
     /* ── Allocate tunnel ── */
@@ -1160,12 +1251,25 @@ main(int argc, char *argv[])
     /* ── Cleanup ── */
     printf("[masque] Event loop exited\n");
 
+    /* Print statistics */
+    masque_print_stats(&tunnel);
+
+    int exit_code;
     if (tunnel.recv_done) {
         printf("[masque] SUCCESS: sent=%d recv=%d (%zu bytes total)\n",
                tunnel.send_count, tunnel.recv_count, tunnel.recv_len);
+        exit_code = 0;
+    } else if (tunnel.response_ok && tunnel.recv_count > 0) {
+        printf("[masque] PARTIAL: sent=%d recv=%d (expected %d)\n",
+               tunnel.send_count, tunnel.recv_count, g_send_count);
+        exit_code = 2;  /* partial success */
+    } else if (!tunnel.response_ok && tunnel.headers_sent) {
+        printf("[masque] FAIL: proxy did not accept tunnel\n");
+        exit_code = 3;  /* proxy rejection */
     } else {
         printf("[masque] FAIL: sent=%d recv=%d (expected %d)\n",
                tunnel.send_count, tunnel.recv_count, g_send_count);
+        exit_code = 1;
     }
 
     event_free(conn.ev_socket);
@@ -1174,11 +1278,12 @@ main(int argc, char *argv[])
 
     xqc_engine_destroy(ctx.engine);
     event_free(ctx.ev_engine);
+    event_free(ctx.ev_sigint);
     event_base_free(ctx.eb);
 
     if (ctx.log_fd >= 0) {
         close(ctx.log_fd);
     }
 
-    return tunnel.recv_done ? 0 : 1;
+    return exit_code;
 }
