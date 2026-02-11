@@ -431,16 +431,18 @@ masque_tunnel_send_ip_data(masque_tunnel_t *tun)
         return -1;
     }
 
-    tun->send_count++;
     printf("[masque] Sending ICMP echo [%d/%d]: %u.%u.%u.%u -> %u.%u.%u.%u (%zu bytes)\n",
-           tun->send_count, g_send_count,
+           tun->send_count + 1, g_send_count,
            tun->assigned_ip[0], tun->assigned_ip[1],
            tun->assigned_ip[2], tun->assigned_ip[3],
            dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], ip_len);
 
     int ret = masque_tunnel_send_dgram(tun, ip_pkt, ip_len);
-    if (ret == 0 && tun->send_count >= g_send_count) {
-        tun->send_done = 1;
+    if (ret == 0) {
+        tun->send_count++;
+        if (tun->send_count >= g_send_count) {
+            tun->send_done = 1;
+        }
     }
     return ret;
 }
@@ -516,13 +518,15 @@ masque_dgram_read_cb(xqc_h3_conn_t *h3c, const void *data, size_t data_len,
 
         /* CONNECT-UDP: send next datagram if more to send */
         if (!tun->send_done) {
-            tun->send_count++;
             printf("[masque] Sending datagram [%d/%d]\n",
-                   tun->send_count, g_send_count);
+                   tun->send_count + 1, g_send_count);
             int ret = masque_tunnel_send_dgram(tun,
                 (const uint8_t *)tun->send_data, tun->send_data_len);
-            if (ret == 0 && tun->send_count >= g_send_count) {
-                tun->send_done = 1;
+            if (ret == 0) {
+                tun->send_count++;
+                if (tun->send_count >= g_send_count) {
+                    tun->send_done = 1;
+                }
             }
         }
     }
@@ -548,11 +552,13 @@ masque_dgram_write_cb(xqc_h3_conn_t *h3c, void *user_data)
     if (tun->response_ok && !tun->send_done && !g_connect_ip) {
         /* CONNECT-UDP: retry send if EAGAIN on prior attempt */
         printf("[masque] dgram_write: tunnel ready, sending data\n");
-        tun->send_count++;
         int ret = masque_tunnel_send_dgram(tun,
             (const uint8_t *)tun->send_data, tun->send_data_len);
-        if (ret == 0 && tun->send_count >= g_send_count) {
-            tun->send_done = 1;
+        if (ret == 0) {
+            tun->send_count++;
+            if (tun->send_count >= g_send_count) {
+                tun->send_done = 1;
+            }
         }
     }
 }
@@ -702,13 +708,15 @@ masque_h3_request_read_cb(xqc_h3_request_t *h3r,
                     } else {
                         /* CONNECT-UDP: send first datagram immediately */
                         if (!tun->send_done && tun->send_data && tun->send_data_len > 0) {
-                            tun->send_count++;
                             printf("[masque] Sending datagram [%d/%d]\n",
-                                   tun->send_count, g_send_count);
+                                   tun->send_count + 1, g_send_count);
                             int ret = masque_tunnel_send_dgram(tun,
                                 (const uint8_t *)tun->send_data, tun->send_data_len);
-                            if (ret == 0 && tun->send_count >= g_send_count) {
-                                tun->send_done = 1;
+                            if (ret == 0) {
+                                tun->send_count++;
+                                if (tun->send_count >= g_send_count) {
+                                    tun->send_done = 1;
+                                }
                             }
                         }
                     }

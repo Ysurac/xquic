@@ -231,10 +231,14 @@ masque_capsule_encode(uint8_t *out, size_t outlen,
         return 0;
     }
 
+    if (paylen > 0 && payload == NULL) {
+        return 0;
+    }
+
     size_t off = 0;
     off += masque_varint_encode(out + off, outlen - off, type);
     off += masque_varint_encode(out + off, outlen - off, (uint64_t)paylen);
-    if (paylen > 0 && payload != NULL) {
+    if (paylen > 0) {
         memcpy(out + off, payload, paylen);
     }
 

@@ -135,7 +135,7 @@ test_udp_framing_errors(void)
     size_t poff, plen;
     int rc = masque_unframe_udp_datagram(trunc, 1, &qid, &ctx, &poff, &plen);
     /* should fail: only 1 byte = quarter_id OK, but no room for context_id */
-    CU_ASSERT(rc == -1 || plen == 0);
+    CU_ASSERT_EQUAL(rc, -1);
 
     /* unframe: empty buffer */
     rc = masque_unframe_udp_datagram(trunc, 0, &qid, &ctx, &poff, &plen);
@@ -223,6 +223,9 @@ test_capsule_errors(void)
     /* decode: only type byte, no length */
     buf[0] = 0x01;
     CU_ASSERT_EQUAL(masque_capsule_decode(buf, 1, &type, &poff, &plen), -1);
+
+    /* encode: paylen > 0 but payload is NULL */
+    CU_ASSERT_EQUAL(masque_capsule_encode(buf, sizeof(buf), 0, NULL, 5), 0);
 }
 
 static void
