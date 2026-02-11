@@ -227,6 +227,14 @@ masque_save_tp(const char *data, size_t len, void *user)
     /* no-op */
 }
 
+static int
+masque_cert_verify(const unsigned char *certs[],
+    const size_t cert_len[], size_t certs_len, void *conn_user_data)
+{
+    /* Accept all certificates (self-signed certs for interop testing) */
+    return 0;
+}
+
 /* ──────────────────────────────────────────────────────────── */
 /*  Tunnel: send Extended CONNECT headers                       */
 /* ──────────────────────────────────────────────────────────── */
@@ -786,6 +794,7 @@ main(int argc, char *argv[])
         .save_token      = masque_save_token,
         .save_session_cb = masque_save_session,
         .save_tp_cb      = masque_save_tp,
+        .cert_verify_cb  = masque_cert_verify,
     };
 
     /* ── Engine config ── */

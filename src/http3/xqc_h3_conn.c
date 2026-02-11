@@ -404,8 +404,11 @@ xqc_h3_conn_init_callbacks(xqc_h3_conn_t *h3c)
     
     if (h3c->flags & XQC_H3_CONN_FLAG_EXT_ENABLED) {
         h3c->h3_ext_bs_callbacks = h3_cbs->h3_ext_bs_cbs;
-        h3c->h3_ext_dgram_callbacks = h3_cbs->h3_ext_dgram_cbs;
     }
+
+    /* datagram callbacks are needed for both "h3" and "h3-ext" ALPNs
+     * when MASQUE / HTTP Datagrams (RFC 9297) are in use */
+    h3c->h3_ext_dgram_callbacks = h3_cbs->h3_ext_dgram_cbs;
 
     return XQC_OK;
 }
