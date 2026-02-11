@@ -124,6 +124,7 @@ static int      g_no_crypto             = 0;
 static int      g_log_level             = MASQUE_DEFAULT_LOG_LEVEL;
 static char     g_proxy_host[256]       = "";  /* SNI host, defaults to proxy_addr */
 static char     g_uri_path[1024]        = "";  /* override .well-known URI template */
+static int      g_allow_self_signed     = 0;   /* -S: accept self-signed certs */
 
 /* ──────────────────────────────────────────────────────────── */
 /*  Forward declarations                                        */
@@ -723,6 +724,7 @@ masque_usage(const char *prog)
            "  -P <port>    Target port for CONNECT-UDP (default: 9999)\n"
            "  -d <data>    Data to send through tunnel (default: 'Hello MASQUE!')\n"
            "  -U <path>    Override URI template path\n"
+           "  -S           Allow self-signed certificates\n"
            "  -k           No encryption (testing only)\n"
            "  -l <level>   Log level 0-5 (default: %d)\n"
            "  -h           Show this help\n",
@@ -733,7 +735,7 @@ int
 main(int argc, char *argv[])
 {
     int opt;
-    while ((opt = getopt(argc, argv, "a:p:H:T:P:d:U:kl:h")) != -1) {
+    while ((opt = getopt(argc, argv, "a:p:H:T:P:d:U:Skl:h")) != -1) {
         switch (opt) {
         case 'a': strncpy(g_proxy_addr, optarg, sizeof(g_proxy_addr) - 1); break;
         case 'p': g_proxy_port = atoi(optarg); break;
@@ -742,6 +744,7 @@ main(int argc, char *argv[])
         case 'P': g_target_port = atoi(optarg); break;
         case 'd': strncpy(g_send_data, optarg, sizeof(g_send_data) - 1); break;
         case 'U': strncpy(g_uri_path, optarg, sizeof(g_uri_path) - 1); break;
+        case 'S': g_allow_self_signed = 1; break;
         case 'k': g_no_crypto = 1; break;
         case 'l': g_log_level = atoi(optarg); break;
         case 'h':
@@ -874,6 +877,10 @@ main(int argc, char *argv[])
     conn_settings.max_datagram_frame_size = 65535;
 
     xqc_conn_ssl_config_t conn_ssl_cfg = {0};
+    if (g_allow_self_signed) {
+        conn_ssl_cfg.cert_verify_flag = XQC_TLS_CERT_FLAG_NEED_VERIFY
+                                      | XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED;
+    }
 
     const char *sni = g_proxy_host[0] ? g_proxy_host : g_proxy_addr;
 
