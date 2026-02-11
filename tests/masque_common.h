@@ -191,4 +191,148 @@ masque_udp_mss(size_t mss, uint64_t stream_id)
     return mss - overhead;
 }
 
+/**
+ * Capsule Protocol (RFC 9297, Section 3.2).
+ *
+ * Capsule wire format:
+ *   [Capsule Type : varint] [Capsule Length : varint] [Capsule Value]
+ *
+ * Used by CONNECT-IP (RFC 9484) for control messages on the H3 stream.
+ */
+
+/* RFC 9297 capsule types */
+#define MASQUE_CAPSULE_DATAGRAM         0x00
+
+/* RFC 9484 capsule types for CONNECT-IP */
+#define MASQUE_CAPSULE_ADDRESS_ASSIGN   0x01
+#define MASQUE_CAPSULE_ADDRESS_REQUEST  0x02
+#define MASQUE_CAPSULE_ROUTE_ADVERTISEMENT  0x03
+
+/**
+ * Encode a capsule into buf.
+ * Returns the total encoded length, or 0 on error (buffer too small).
+ *
+ * @param out       output buffer
+ * @param outlen    output buffer capacity
+ * @param type      capsule type
+ * @param payload   capsule value (may be NULL if paylen == 0)
+ * @param paylen    length of the capsule value
+ */
+static inline size_t
+masque_capsule_encode(uint8_t *out, size_t outlen,
+                      uint64_t type,
+                      const uint8_t *payload, size_t paylen)
+{
+    size_t type_len = masque_varint_len(type);
+    size_t len_len = masque_varint_len((uint64_t)paylen);
+    size_t total = type_len + len_len + paylen;
+
+    if (outlen < total) {
+        return 0;
+    }
+
+    size_t off = 0;
+    off += masque_varint_encode(out + off, outlen - off, type);
+    off += masque_varint_encode(out + off, outlen - off, (uint64_t)paylen);
+    if (paylen > 0 && payload != NULL) {
+        memcpy(out + off, payload, paylen);
+    }
+
+    return total;
+}
+
+/**
+ * Decode a capsule header from buf.
+ * Returns 0 on success, -1 on error (buffer too small / truncated).
+ *
+ * On success:
+ *   *type           = capsule type
+ *   *payload_offset = offset to the capsule value within buf
+ *   *payload_len    = length of the capsule value
+ *
+ * Note: caller must verify buf has at least (payload_offset + payload_len) bytes.
+ *
+ * @param buf              input buffer
+ * @param buflen           length of input buffer
+ * @param type             [out] capsule type
+ * @param payload_offset   [out] offset to capsule value
+ * @param payload_len      [out] length of capsule value
+ */
+static inline int
+masque_capsule_decode(const uint8_t *buf, size_t buflen,
+                      uint64_t *type,
+                      size_t *payload_offset, size_t *payload_len)
+{
+    size_t off = 0;
+    size_t n;
+
+    n = masque_varint_decode(buf + off, buflen - off, type);
+    if (n == 0) {
+        return -1;
+    }
+    off += n;
+
+    uint64_t len64;
+    n = masque_varint_decode(buf + off, buflen - off, &len64);
+    if (n == 0) {
+        return -1;
+    }
+    off += n;
+
+    *payload_offset = off;
+    *payload_len = (size_t)len64;
+    return 0;
+}
+
+/**
+ * CONNECT-IP Address Assign capsule payload (RFC 9484, Section 4.7.1).
+ *
+ * Payload format:
+ *   [Request ID : varint] [IP Version : 1 byte] [IP Address : 4 or 16 bytes]
+ *   [IP Prefix Length : 1 byte]
+ *
+ * This is a simplified parser for a single assigned address.
+ */
+static inline int
+masque_parse_address_assign(const uint8_t *payload, size_t paylen,
+                            uint64_t *request_id,
+                            uint8_t *ip_version,
+                            uint8_t *ip_addr, size_t *ip_addr_len,
+                            uint8_t *prefix_len)
+{
+    size_t off = 0;
+    size_t n;
+
+    n = masque_varint_decode(payload + off, paylen - off, request_id);
+    if (n == 0) {
+        return -1;
+    }
+    off += n;
+
+    if (off >= paylen) {
+        return -1;
+    }
+    *ip_version = payload[off++];
+
+    size_t addr_len;
+    if (*ip_version == 4) {
+        addr_len = 4;
+    } else if (*ip_version == 6) {
+        addr_len = 16;
+    } else {
+        return -1;
+    }
+
+    if (off + addr_len + 1 > paylen) {
+        return -1;
+    }
+
+    memcpy(ip_addr, payload + off, addr_len);
+    *ip_addr_len = addr_len;
+    off += addr_len;
+
+    *prefix_len = payload[off];
+    return 0;
+}
+
 #endif /* MASQUE_COMMON_H */

@@ -161,6 +161,131 @@ test_udp_mss(void)
     CU_ASSERT_EQUAL(masque_udp_mss(0, 0), 0);
 }
 
+/* ── Capsule Protocol ── */
+
+static void
+test_capsule_roundtrip(void)
+{
+    const uint8_t payload[] = "IP packet data";
+    size_t paylen = sizeof(payload) - 1;
+    uint8_t buf[256];
+
+    /* encode DATAGRAM capsule (type=0) */
+    size_t enc_len = masque_capsule_encode(buf, sizeof(buf),
+                                            MASQUE_CAPSULE_DATAGRAM,
+                                            payload, paylen);
+    CU_ASSERT(enc_len > 0);
+    CU_ASSERT_EQUAL(enc_len, 1 + 1 + paylen); /* type(1) + len(1) + payload */
+
+    uint64_t type;
+    size_t poff, plen;
+    int rc = masque_capsule_decode(buf, enc_len, &type, &poff, &plen);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(type, MASQUE_CAPSULE_DATAGRAM);
+    CU_ASSERT_EQUAL(plen, paylen);
+    CU_ASSERT(memcmp(buf + poff, payload, paylen) == 0);
+
+    /* encode ADDRESS_ASSIGN capsule (type=1) */
+    enc_len = masque_capsule_encode(buf, sizeof(buf),
+                                     MASQUE_CAPSULE_ADDRESS_ASSIGN,
+                                     payload, paylen);
+    CU_ASSERT(enc_len > 0);
+    rc = masque_capsule_decode(buf, enc_len, &type, &poff, &plen);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(type, MASQUE_CAPSULE_ADDRESS_ASSIGN);
+    CU_ASSERT_EQUAL(plen, paylen);
+
+    /* empty payload capsule */
+    enc_len = masque_capsule_encode(buf, sizeof(buf),
+                                     MASQUE_CAPSULE_ROUTE_ADVERTISEMENT,
+                                     NULL, 0);
+    CU_ASSERT(enc_len > 0);
+    CU_ASSERT_EQUAL(enc_len, 2); /* type(1) + len=0(1) */
+    rc = masque_capsule_decode(buf, enc_len, &type, &poff, &plen);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(type, MASQUE_CAPSULE_ROUTE_ADVERTISEMENT);
+    CU_ASSERT_EQUAL(plen, 0);
+}
+
+static void
+test_capsule_errors(void)
+{
+    uint8_t buf[4];
+
+    /* buffer too small for encode */
+    CU_ASSERT_EQUAL(masque_capsule_encode(buf, 1, 0, (const uint8_t *)"x", 1), 0);
+
+    /* decode: empty buffer */
+    uint64_t type;
+    size_t poff, plen;
+    CU_ASSERT_EQUAL(masque_capsule_decode(buf, 0, &type, &poff, &plen), -1);
+
+    /* decode: only type byte, no length */
+    buf[0] = 0x01;
+    CU_ASSERT_EQUAL(masque_capsule_decode(buf, 1, &type, &poff, &plen), -1);
+}
+
+static void
+test_address_assign_parse(void)
+{
+    /* Build an ADDRESS_ASSIGN payload:
+     * request_id=0 (1 byte), ip_version=4 (1 byte),
+     * ip_addr=10.0.0.1 (4 bytes), prefix_len=32 (1 byte) */
+    uint8_t payload[7];
+    payload[0] = 0x00;  /* request_id = 0 */
+    payload[1] = 4;     /* IPv4 */
+    payload[2] = 10;    /* 10.0.0.1 */
+    payload[3] = 0;
+    payload[4] = 0;
+    payload[5] = 1;
+    payload[6] = 32;    /* /32 */
+
+    uint64_t req_id;
+    uint8_t ip_ver, ip_addr[16], pfx_len;
+    size_t ip_addr_len;
+    int rc = masque_parse_address_assign(payload, sizeof(payload),
+                                          &req_id, &ip_ver,
+                                          ip_addr, &ip_addr_len, &pfx_len);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(req_id, 0);
+    CU_ASSERT_EQUAL(ip_ver, 4);
+    CU_ASSERT_EQUAL(ip_addr_len, 4);
+    CU_ASSERT_EQUAL(ip_addr[0], 10);
+    CU_ASSERT_EQUAL(ip_addr[1], 0);
+    CU_ASSERT_EQUAL(ip_addr[2], 0);
+    CU_ASSERT_EQUAL(ip_addr[3], 1);
+    CU_ASSERT_EQUAL(pfx_len, 32);
+
+    /* IPv6 test: request_id=1, ip_version=6, ::1/128 */
+    uint8_t payload6[19];
+    payload6[0] = 0x01;  /* request_id = 1 */
+    payload6[1] = 6;     /* IPv6 */
+    memset(payload6 + 2, 0, 15);
+    payload6[17] = 1;    /* ::1 */
+    payload6[18] = 128;  /* /128 */
+
+    rc = masque_parse_address_assign(payload6, sizeof(payload6),
+                                      &req_id, &ip_ver,
+                                      ip_addr, &ip_addr_len, &pfx_len);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(req_id, 1);
+    CU_ASSERT_EQUAL(ip_ver, 6);
+    CU_ASSERT_EQUAL(ip_addr_len, 16);
+    CU_ASSERT_EQUAL(pfx_len, 128);
+
+    /* truncated payload: missing prefix_len */
+    rc = masque_parse_address_assign(payload, 6, &req_id, &ip_ver,
+                                      ip_addr, &ip_addr_len, &pfx_len);
+    CU_ASSERT_EQUAL(rc, -1);
+
+    /* invalid IP version */
+    payload[1] = 5;
+    rc = masque_parse_address_assign(payload, sizeof(payload),
+                                      &req_id, &ip_ver,
+                                      ip_addr, &ip_addr_len, &pfx_len);
+    CU_ASSERT_EQUAL(rc, -1);
+}
+
 /* ── Entry point ── */
 
 void
@@ -172,4 +297,7 @@ xqc_test_masque(void)
     test_udp_framing_roundtrip();
     test_udp_framing_errors();
     test_udp_mss();
+    test_capsule_roundtrip();
+    test_capsule_errors();
+    test_address_assign_parse();
 }
