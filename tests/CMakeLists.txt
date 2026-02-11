@@ -73,6 +73,13 @@ endif()
 target_link_libraries(test_server ${APP_DEPEND_LIBS})
 target_link_libraries(test_client ${APP_DEPEND_LIBS})
 
+### MASQUE test client ###
+set(MASQUE_CLIENT_SOURCES
+    masque_client.c
+)
+add_executable(masque_client ${MASQUE_CLIENT_SOURCES})
+target_link_libraries(masque_client ${APP_DEPEND_LIBS})
+
 
 # build run_tests
 if(HAVE_CUNIT)

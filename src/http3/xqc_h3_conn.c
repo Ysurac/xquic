@@ -20,6 +20,8 @@ const xqc_h3_conn_settings_t default_local_h3_conn_settings = {
 #ifdef XQC_COMPAT_DUPLICATE
     .qpack_compat_duplicate         = XQC_FALSE,
 #endif
+    .enable_connect_protocol        = 0,
+    .h3_datagram                    = 0,
 };
 
 const xqc_h3_conn_settings_t default_peer_h3_conn_settings = {
@@ -31,6 +33,8 @@ const xqc_h3_conn_settings_t default_peer_h3_conn_settings = {
 #ifdef XQC_COMPAT_DUPLICATE
     .qpack_compat_duplicate         = XQC_FALSE,
 #endif
+    .enable_connect_protocol        = 0,
+    .h3_datagram                    = 0,
 };
 
 
@@ -720,6 +724,16 @@ xqc_h3_conn_on_settings_entry_received(uint64_t identifier, uint64_t value, void
             xqc_log(h3c->log, XQC_LOG_ERROR, "|set qpack blocked stream error|ret:%d", ret);
             return ret;
         }
+        break;
+
+    case XQC_H3_SETTINGS_ENABLE_CONNECT_PROTOCOL:
+        h3c->peer_h3_conn_settings.enable_connect_protocol = value;
+        xqc_log(h3c->log, XQC_LOG_DEBUG, "|peer enable_connect_protocol:%ui|", value);
+        break;
+
+    case XQC_H3_SETTINGS_H3_DATAGRAM:
+        h3c->peer_h3_conn_settings.h3_datagram = value;
+        xqc_log(h3c->log, XQC_LOG_DEBUG, "|peer h3_datagram:%ui|", value);
         break;
 
     default:

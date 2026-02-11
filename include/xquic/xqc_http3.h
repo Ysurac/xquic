@@ -284,6 +284,12 @@ typedef struct xqc_h3_conn_settings_s {
     xqc_bool_t  qpack_compat_duplicate;
 #endif
 
+    /** RFC 9220: SETTINGS_ENABLE_CONNECT_PROTOCOL (0x08). 1 = enable Extended CONNECT */
+    uint64_t enable_connect_protocol;
+
+    /** RFC 9297: SETTINGS_H3_DATAGRAM (0x33). 1 = enable HTTP Datagrams */
+    uint64_t h3_datagram;
+
 } xqc_h3_conn_settings_t;
 
 /**
