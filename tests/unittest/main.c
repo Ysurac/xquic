@@ -41,6 +41,7 @@
 #include "xqc_fec_scheme_test.h"
 #include "xqc_fec_test.h"
 #include "xqc_ack_with_timestamp_test.h"
+#include "xqc_masque_test.h"
 
 static int xqc_init_suite(void) { return 0; }
 static int xqc_clean_suite(void) { return 0; }
@@ -74,6 +75,7 @@ main()
         || !CU_add_test(pSuite, "xqc_test_short_header_parse_cid", xqc_test_short_header_packet_parse_cid)
         || !CU_add_test(pSuite, "xqc_test_long_header_parse_cid", xqc_test_long_header_packet_parse_cid)
         || !CU_add_test(pSuite, "xqc_test_empty_pkt", xqc_test_empty_pkt)
+        || !CU_add_test(pSuite, "xqc_test_masque", xqc_test_masque)
         || !CU_add_test(pSuite, "xqc_test_engine_packet_process", xqc_test_engine_packet_process)
         || !CU_add_test(pSuite, "xqc_test_stream_frame", xqc_test_stream_frame)
         || !CU_add_test(pSuite, "xqc_test_process_frame", xqc_test_process_frame)
