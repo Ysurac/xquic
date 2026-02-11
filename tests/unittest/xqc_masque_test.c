@@ -286,6 +286,204 @@ test_address_assign_parse(void)
     CU_ASSERT_EQUAL(rc, -1);
 }
 
+/* ── ADDRESS_REQUEST builder ── */
+
+static void
+test_address_request_build(void)
+{
+    uint8_t buf[64];
+
+    /* Build IPv4 request for any address */
+    uint8_t any_ip[4] = {0, 0, 0, 0};
+    size_t len = masque_build_address_request(buf, sizeof(buf), 0, 4, any_ip, 0);
+    CU_ASSERT(len > 0);
+    CU_ASSERT_EQUAL(len, 1 + 1 + 4 + 1); /* req_id(1) + ip_ver(1) + addr(4) + pfx(1) */
+
+    /* Verify by parsing back with masque_parse_address_assign (same wire format) */
+    uint64_t req_id;
+    uint8_t ip_ver, ip_addr[16], pfx_len;
+    size_t ip_addr_len;
+    int rc = masque_parse_address_assign(buf, len,
+                                          &req_id, &ip_ver,
+                                          ip_addr, &ip_addr_len, &pfx_len);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(req_id, 0);
+    CU_ASSERT_EQUAL(ip_ver, 4);
+    CU_ASSERT_EQUAL(ip_addr_len, 4);
+    CU_ASSERT_EQUAL(ip_addr[0], 0);
+    CU_ASSERT_EQUAL(ip_addr[1], 0);
+    CU_ASSERT_EQUAL(ip_addr[2], 0);
+    CU_ASSERT_EQUAL(ip_addr[3], 0);
+    CU_ASSERT_EQUAL(pfx_len, 0);
+
+    /* Build IPv4 request for specific address */
+    uint8_t specific_ip[4] = {192, 168, 1, 100};
+    len = masque_build_address_request(buf, sizeof(buf), 42, 4, specific_ip, 32);
+    CU_ASSERT(len > 0);
+    rc = masque_parse_address_assign(buf, len,
+                                      &req_id, &ip_ver,
+                                      ip_addr, &ip_addr_len, &pfx_len);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(req_id, 42);
+    CU_ASSERT_EQUAL(ip_ver, 4);
+    CU_ASSERT_EQUAL(ip_addr[0], 192);
+    CU_ASSERT_EQUAL(ip_addr[1], 168);
+    CU_ASSERT_EQUAL(ip_addr[2], 1);
+    CU_ASSERT_EQUAL(ip_addr[3], 100);
+    CU_ASSERT_EQUAL(pfx_len, 32);
+
+    /* Build IPv6 request */
+    uint8_t ipv6_addr[16] = {0};
+    len = masque_build_address_request(buf, sizeof(buf), 1, 6, ipv6_addr, 0);
+    CU_ASSERT(len > 0);
+    CU_ASSERT_EQUAL(len, 1 + 1 + 16 + 1); /* req_id(1) + ip_ver(1) + addr(16) + pfx(1) */
+    rc = masque_parse_address_assign(buf, len,
+                                      &req_id, &ip_ver,
+                                      ip_addr, &ip_addr_len, &pfx_len);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(ip_ver, 6);
+    CU_ASSERT_EQUAL(ip_addr_len, 16);
+
+    /* Capsule encode/decode round-trip */
+    uint8_t capsule_buf[128];
+    uint8_t req_payload[32];
+    size_t req_len = masque_build_address_request(req_payload, sizeof(req_payload),
+                                                    0, 4, any_ip, 0);
+    CU_ASSERT(req_len > 0);
+    size_t cap_len = masque_capsule_encode(capsule_buf, sizeof(capsule_buf),
+                                            MASQUE_CAPSULE_ADDRESS_REQUEST,
+                                            req_payload, req_len);
+    CU_ASSERT(cap_len > 0);
+
+    uint64_t cap_type;
+    size_t pay_off, pay_len;
+    rc = masque_capsule_decode(capsule_buf, cap_len, &cap_type, &pay_off, &pay_len);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(cap_type, MASQUE_CAPSULE_ADDRESS_REQUEST);
+    CU_ASSERT_EQUAL(pay_len, req_len);
+
+    /* Error: invalid IP version */
+    CU_ASSERT_EQUAL(masque_build_address_request(buf, sizeof(buf), 0, 5, any_ip, 0), 0);
+
+    /* Error: buffer too small */
+    CU_ASSERT_EQUAL(masque_build_address_request(buf, 3, 0, 4, any_ip, 0), 0);
+}
+
+/* ── ROUTE_ADVERTISEMENT parser ── */
+
+static void
+test_route_advertisement_parse(void)
+{
+    /* Build a single IPv4 route entry:
+     * [IP Version=4][Start IP: 0.0.0.0][End IP: 255.255.255.255][Protocol=0] */
+    uint8_t route[10];
+    route[0] = 4;                          /* IPv4 */
+    route[1] = 0; route[2] = 0; route[3] = 0; route[4] = 0;          /* start: 0.0.0.0 */
+    route[5] = 255; route[6] = 255; route[7] = 255; route[8] = 255;  /* end: 255.255.255.255 */
+    route[9] = 0;                          /* protocol: all */
+
+    uint8_t ip_ver, start_ip[16], end_ip[16], ip_proto;
+    size_t addr_len, consumed;
+    int rc = masque_parse_route_advertisement(route, sizeof(route),
+                                               &ip_ver, start_ip, end_ip,
+                                               &addr_len, &ip_proto, &consumed);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(ip_ver, 4);
+    CU_ASSERT_EQUAL(addr_len, 4);
+    CU_ASSERT_EQUAL(start_ip[0], 0);
+    CU_ASSERT_EQUAL(start_ip[3], 0);
+    CU_ASSERT_EQUAL(end_ip[0], 255);
+    CU_ASSERT_EQUAL(end_ip[3], 255);
+    CU_ASSERT_EQUAL(ip_proto, 0);
+    CU_ASSERT_EQUAL(consumed, 10);
+
+    /* Build two IPv4 entries back-to-back */
+    uint8_t routes[20];
+    /* Entry 1: 10.0.0.0 - 10.0.0.255, proto=1 (ICMP) */
+    routes[0] = 4;
+    routes[1] = 10; routes[2] = 0; routes[3] = 0; routes[4] = 0;
+    routes[5] = 10; routes[6] = 0; routes[7] = 0; routes[8] = 255;
+    routes[9] = 1;
+    /* Entry 2: 192.168.0.0 - 192.168.255.255, proto=6 (TCP) */
+    routes[10] = 4;
+    routes[11] = 192; routes[12] = 168; routes[13] = 0; routes[14] = 0;
+    routes[15] = 192; routes[16] = 168; routes[17] = 255; routes[18] = 255;
+    routes[19] = 6;
+
+    /* Parse entry 1 */
+    rc = masque_parse_route_advertisement(routes, sizeof(routes),
+                                           &ip_ver, start_ip, end_ip,
+                                           &addr_len, &ip_proto, &consumed);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(ip_ver, 4);
+    CU_ASSERT_EQUAL(start_ip[0], 10);
+    CU_ASSERT_EQUAL(end_ip[3], 255);
+    CU_ASSERT_EQUAL(ip_proto, 1);
+    CU_ASSERT_EQUAL(consumed, 10);
+
+    /* Parse entry 2 */
+    rc = masque_parse_route_advertisement(routes + consumed, sizeof(routes) - consumed,
+                                           &ip_ver, start_ip, end_ip,
+                                           &addr_len, &ip_proto, &consumed);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(ip_ver, 4);
+    CU_ASSERT_EQUAL(start_ip[0], 192);
+    CU_ASSERT_EQUAL(start_ip[1], 168);
+    CU_ASSERT_EQUAL(end_ip[0], 192);
+    CU_ASSERT_EQUAL(end_ip[1], 168);
+    CU_ASSERT_EQUAL(ip_proto, 6);
+
+    /* IPv6 entry: [ver=6][start: 16 bytes][end: 16 bytes][proto=0] = 34 bytes */
+    uint8_t route6[34];
+    route6[0] = 6;
+    memset(route6 + 1, 0, 16);            /* start: :: */
+    memset(route6 + 17, 0xFF, 16);        /* end: ffff:...:ffff */
+    route6[33] = 0;
+    rc = masque_parse_route_advertisement(route6, sizeof(route6),
+                                           &ip_ver, start_ip, end_ip,
+                                           &addr_len, &ip_proto, &consumed);
+    CU_ASSERT_EQUAL(rc, 0);
+    CU_ASSERT_EQUAL(ip_ver, 6);
+    CU_ASSERT_EQUAL(addr_len, 16);
+    CU_ASSERT_EQUAL(start_ip[0], 0);
+    CU_ASSERT_EQUAL(end_ip[0], 0xFF);
+    CU_ASSERT_EQUAL(consumed, 34);
+}
+
+static void
+test_route_advertisement_errors(void)
+{
+    uint8_t ip_ver, start_ip[16], end_ip[16], ip_proto;
+    size_t addr_len, consumed;
+
+    /* Empty buffer */
+    int rc = masque_parse_route_advertisement(NULL, 0,
+                                               &ip_ver, start_ip, end_ip,
+                                               &addr_len, &ip_proto, &consumed);
+    CU_ASSERT_EQUAL(rc, -1);
+
+    /* Invalid IP version */
+    uint8_t bad_ver[10] = {5, 0,0,0,0, 255,255,255,255, 0};
+    rc = masque_parse_route_advertisement(bad_ver, sizeof(bad_ver),
+                                           &ip_ver, start_ip, end_ip,
+                                           &addr_len, &ip_proto, &consumed);
+    CU_ASSERT_EQUAL(rc, -1);
+
+    /* Truncated IPv4 entry (missing end IP + proto) */
+    uint8_t trunc[6] = {4, 10, 0, 0, 0, 10};
+    rc = masque_parse_route_advertisement(trunc, sizeof(trunc),
+                                           &ip_ver, start_ip, end_ip,
+                                           &addr_len, &ip_proto, &consumed);
+    CU_ASSERT_EQUAL(rc, -1);
+
+    /* Truncated IPv6 entry */
+    uint8_t trunc6[10] = {6, 0,0,0,0, 0,0,0,0, 0};
+    rc = masque_parse_route_advertisement(trunc6, sizeof(trunc6),
+                                           &ip_ver, start_ip, end_ip,
+                                           &addr_len, &ip_proto, &consumed);
+    CU_ASSERT_EQUAL(rc, -1);
+}
+
 /* ── Entry point ── */
 
 void
@@ -300,4 +498,7 @@ xqc_test_masque(void)
     test_capsule_roundtrip();
     test_capsule_errors();
     test_address_assign_parse();
+    test_address_request_build();
+    test_route_advertisement_parse();
+    test_route_advertisement_errors();
 }

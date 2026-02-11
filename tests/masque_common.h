@@ -335,4 +335,112 @@ masque_parse_address_assign(const uint8_t *payload, size_t paylen,
     return 0;
 }
 
+/**
+ * Build an ADDRESS_REQUEST capsule payload (RFC 9484, Section 4.7.2).
+ *
+ * Payload format (same as ADDRESS_ASSIGN):
+ *   [Request ID : varint] [IP Version : 1 byte] [IP Address : 4 or 16 bytes]
+ *   [IP Prefix Length : 1 byte]
+ *
+ * To request any IPv4 address: ip_addr={0,0,0,0}, prefix_len=0.
+ * Returns the payload length written, or 0 on error.
+ *
+ * @param buf         output buffer for the payload (NOT the full capsule)
+ * @param buflen      output buffer capacity
+ * @param request_id  unique request identifier
+ * @param ip_version  4 or 6
+ * @param ip_addr     preferred IP address (or all-zeros for any)
+ * @param prefix_len  requested prefix length
+ */
+static inline size_t
+masque_build_address_request(uint8_t *buf, size_t buflen,
+                              uint64_t request_id, uint8_t ip_version,
+                              const uint8_t *ip_addr, uint8_t prefix_len)
+{
+    size_t addr_len;
+    if (ip_version == 4) {
+        addr_len = 4;
+    } else if (ip_version == 6) {
+        addr_len = 16;
+    } else {
+        return 0;
+    }
+
+    size_t rid_len = masque_varint_len(request_id);
+    size_t total = rid_len + 1 + addr_len + 1; /* rid + ip_ver + addr + pfx */
+
+    if (buflen < total) {
+        return 0;
+    }
+
+    size_t off = 0;
+    off += masque_varint_encode(buf + off, buflen - off, request_id);
+    buf[off++] = ip_version;
+    memcpy(buf + off, ip_addr, addr_len);
+    off += addr_len;
+    buf[off++] = prefix_len;
+
+    return off;
+}
+
+/**
+ * Parse a single ROUTE_ADVERTISEMENT entry (RFC 9484, Section 4.7.3).
+ *
+ * Entry format:
+ *   [IP Version : 1 byte] [Start IP : 4 or 16 bytes]
+ *   [End IP : 4 or 16 bytes] [IP Protocol : 1 byte]
+ *
+ * The capsule payload may contain multiple entries back-to-back.
+ * Call this in a loop, advancing the buffer by *bytes_consumed each time.
+ *
+ * Returns 0 on success, -1 on error (truncated / invalid).
+ *
+ * @param payload        input buffer (at current parse position)
+ * @param paylen         remaining bytes in buffer
+ * @param ip_version     [out] 4 or 6
+ * @param start_ip       [out] start of IP range (4 or 16 bytes)
+ * @param end_ip         [out] end of IP range (4 or 16 bytes)
+ * @param ip_addr_len    [out] 4 (IPv4) or 16 (IPv6)
+ * @param ip_protocol    [out] IP protocol number (0 = all)
+ * @param bytes_consumed [out] number of bytes consumed for this entry
+ */
+static inline int
+masque_parse_route_advertisement(const uint8_t *payload, size_t paylen,
+                                  uint8_t *ip_version,
+                                  uint8_t *start_ip, uint8_t *end_ip,
+                                  size_t *ip_addr_len, uint8_t *ip_protocol,
+                                  size_t *bytes_consumed)
+{
+    size_t off = 0;
+
+    if (off >= paylen) {
+        return -1;
+    }
+    *ip_version = payload[off++];
+
+    size_t addr_len;
+    if (*ip_version == 4) {
+        addr_len = 4;
+    } else if (*ip_version == 6) {
+        addr_len = 16;
+    } else {
+        return -1;
+    }
+
+    /* Need: start_ip + end_ip + ip_protocol */
+    if (off + addr_len + addr_len + 1 > paylen) {
+        return -1;
+    }
+
+    memcpy(start_ip, payload + off, addr_len);
+    off += addr_len;
+    memcpy(end_ip, payload + off, addr_len);
+    off += addr_len;
+    *ip_addr_len = addr_len;
+    *ip_protocol = payload[off++];
+
+    *bytes_consumed = off;
+    return 0;
+}
+
 #endif /* MASQUE_COMMON_H */

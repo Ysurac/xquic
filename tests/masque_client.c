@@ -114,6 +114,12 @@ struct masque_tunnel_s {
     uint8_t                 recv_buf[65536];
     size_t                  recv_len;
     int                     recv_done;
+
+    /* CONNECT-IP state */
+    uint8_t                 assigned_ip[16];
+    size_t                  assigned_ip_len;
+    uint8_t                 assigned_prefix;
+    int                     address_assigned;  /* ADDRESS_ASSIGN received */
 };
 
 /* ──────────────────────────────────────────────────────────── */
@@ -429,6 +435,81 @@ masque_build_icmp_echo(uint8_t *buf, size_t buflen,
 }
 
 /* ──────────────────────────────────────────────────────────── */
+/*  CONNECT-IP: send ADDRESS_REQUEST capsule on H3 stream       */
+/* ──────────────────────────────────────────────────────────── */
+
+static int
+masque_tunnel_send_address_request(masque_tunnel_t *tun)
+{
+    /* Build ADDRESS_REQUEST payload: request any IPv4 address */
+    uint8_t payload[32];
+    uint8_t any_ip[4] = {0, 0, 0, 0};
+    size_t pay_len = masque_build_address_request(
+        payload, sizeof(payload),
+        0,      /* request_id = 0 */
+        4,      /* IPv4 */
+        any_ip, /* any address */
+        0       /* any prefix */
+    );
+    if (pay_len == 0) {
+        printf("[masque] Failed to build ADDRESS_REQUEST payload\n");
+        return -1;
+    }
+
+    /* Wrap in capsule: [type=0x02][length][payload] */
+    uint8_t capsule_buf[64];
+    size_t cap_len = masque_capsule_encode(
+        capsule_buf, sizeof(capsule_buf),
+        MASQUE_CAPSULE_ADDRESS_REQUEST, payload, pay_len);
+    if (cap_len == 0) {
+        printf("[masque] Failed to encode ADDRESS_REQUEST capsule\n");
+        return -1;
+    }
+
+    ssize_t ret = xqc_h3_request_send_body(tun->h3_request,
+                                            capsule_buf, cap_len, 0);
+    if (ret < 0) {
+        printf("[masque] ADDRESS_REQUEST send error: %zd\n", ret);
+        return (int)ret;
+    }
+
+    printf("[masque] Sent ADDRESS_REQUEST: IPv4, any address, req_id=0\n");
+    return 0;
+}
+
+/**
+ * Send ICMP echo using the assigned IP address (called after ADDRESS_ASSIGN).
+ */
+static int
+masque_tunnel_send_ip_data(masque_tunnel_t *tun)
+{
+    if (!tun->address_assigned) {
+        printf("[masque] Cannot send IP data: no address assigned\n");
+        return -1;
+    }
+
+    uint8_t dst_ip[4] = {10, 0, 0, 1};
+    uint8_t ip_pkt[64];
+    size_t ip_len = masque_build_icmp_echo(
+        ip_pkt, sizeof(ip_pkt), tun->assigned_ip, dst_ip);
+    if (ip_len == 0) {
+        printf("[masque] Failed to build IP packet\n");
+        return -1;
+    }
+
+    printf("[masque] Sending ICMP echo: %u.%u.%u.%u -> %u.%u.%u.%u (%zu bytes)\n",
+           tun->assigned_ip[0], tun->assigned_ip[1],
+           tun->assigned_ip[2], tun->assigned_ip[3],
+           dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], ip_len);
+
+    int ret = masque_tunnel_send_dgram(tun, ip_pkt, ip_len);
+    if (ret == 0) {
+        tun->send_done = 1;
+    }
+    return ret;
+}
+
+/* ──────────────────────────────────────────────────────────── */
 /*  H3 datagram callbacks                                       */
 /* ──────────────────────────────────────────────────────────── */
 
@@ -656,38 +737,20 @@ masque_h3_request_read_cb(xqc_h3_request_t *h3r,
                     printf("[masque] %s tunnel established! (status=%d)\n",
                            g_connect_ip ? "CONNECT-IP" : "CONNECT-UDP", status);
 
-                    /* Send the test payload via QUIC DATAGRAM.
-                     * Both CONNECT-UDP and CONNECT-IP use HTTP Datagrams
-                     * (RFC 9297) for data transfer. The framing is the same:
-                     * [Quarter-Stream-ID][Context-ID=0][Payload]
-                     * CONNECT-UDP payload = UDP data, CONNECT-IP payload = IP packet.
-                     */
-                    if (!tun->send_done && tun->send_data && tun->send_data_len > 0) {
-                        int ret;
-                        if (g_connect_ip) {
-                            /* Build a minimal IPv4 ICMP echo request */
-                            uint8_t src_ip[4] = {10, 0, 0, 2};
-                            uint8_t dst_ip[4] = {10, 0, 0, 1};
-                            uint8_t ip_pkt[64];
-                            size_t ip_len = masque_build_icmp_echo(
-                                ip_pkt, sizeof(ip_pkt), src_ip, dst_ip);
-                            if (ip_len > 0) {
-                                printf("[masque] Sending ICMP echo request: "
-                                       "%u.%u.%u.%u -> %u.%u.%u.%u (%zu bytes)\n",
-                                       src_ip[0], src_ip[1], src_ip[2], src_ip[3],
-                                       dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3],
-                                       ip_len);
-                                ret = masque_tunnel_send_dgram(tun, ip_pkt, ip_len);
-                            } else {
-                                printf("[masque] Failed to build IP packet\n");
-                                ret = -1;
-                            }
-                        } else {
-                            ret = masque_tunnel_send_dgram(tun,
+                    if (g_connect_ip) {
+                        /* CONNECT-IP: wait for ADDRESS_ASSIGN before
+                         * sending IP data.  ADDRESS_REQUEST is optional
+                         * per RFC 9484 — many proxies assign addresses
+                         * proactively (e.g. connect-ip-go). */
+                        printf("[masque] Waiting for ADDRESS_ASSIGN...\n");
+                    } else {
+                        /* CONNECT-UDP: send data immediately */
+                        if (!tun->send_done && tun->send_data && tun->send_data_len > 0) {
+                            int ret = masque_tunnel_send_dgram(tun,
                                 (const uint8_t *)tun->send_data, tun->send_data_len);
-                        }
-                        if (ret == 0) {
-                            tun->send_done = 1;
+                            if (ret == 0) {
+                                tun->send_done = 1;
+                            }
                         }
                     }
                 } else {
@@ -741,12 +804,47 @@ masque_h3_request_read_cb(xqc_h3_request_t *h3r,
                                 printf("[masque] ADDRESS_ASSIGN: req_id=%" PRIu64
                                        " IPv6=.../%u\n", req_id, pfx_len);
                             }
+
+                            /* Store the assigned address */
+                            memcpy(tun->assigned_ip, ip_addr, ip_addr_len);
+                            tun->assigned_ip_len = ip_addr_len;
+                            tun->assigned_prefix = pfx_len;
+                            tun->address_assigned = 1;
+
+                            /* Now send IP data using the assigned address */
+                            if (!tun->send_done) {
+                                masque_tunnel_send_ip_data(tun);
+                            }
                         }
-                    } else if (cap_type == MASQUE_CAPSULE_ROUTE_ADVERTISEMENT) {
+                    } else if (cap_type == MASQUE_CAPSULE_ROUTE_ADVERTISEMENT && pay_len > 0) {
                         /* Control capsule: route advertisement */
-                        printf("[masque] ROUTE_ADVERTISEMENT: %zu bytes\n", pay_len);
+                        const uint8_t *route_buf = body_buf + off + pay_off;
+                        size_t route_remaining = pay_len;
+                        int entry_idx = 0;
+                        while (route_remaining > 0) {
+                            uint8_t r_ver, r_start[16], r_end[16], r_proto;
+                            size_t r_addr_len, r_consumed;
+                            if (masque_parse_route_advertisement(
+                                    route_buf, route_remaining,
+                                    &r_ver, r_start, r_end, &r_addr_len,
+                                    &r_proto, &r_consumed) < 0) {
+                                break;
+                            }
+                            if (r_ver == 4) {
+                                printf("[masque] ROUTE[%d]: IPv4 %u.%u.%u.%u - "
+                                       "%u.%u.%u.%u proto=%u\n", entry_idx,
+                                       r_start[0], r_start[1], r_start[2], r_start[3],
+                                       r_end[0], r_end[1], r_end[2], r_end[3], r_proto);
+                            } else {
+                                printf("[masque] ROUTE[%d]: IPv6 proto=%u\n",
+                                       entry_idx, r_proto);
+                            }
+                            route_buf += r_consumed;
+                            route_remaining -= r_consumed;
+                            entry_idx++;
+                        }
                     } else {
-                        printf("[masque] Unknown capsule type=%" PRIu64
+                        printf("[masque] Capsule type=%" PRIu64
                                " (%zu bytes)\n", cap_type, pay_len);
                     }
 
