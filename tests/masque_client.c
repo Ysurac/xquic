@@ -1,16 +1,21 @@
 /**
  * @copyright Copyright (c) 2022, Alibaba Group Holding Limited
  *
- * MASQUE CONNECT-UDP test client (RFC 9298).
- * Connects to a MASQUE proxy via H3, establishes a CONNECT-UDP tunnel,
- * and sends/receives UDP datagrams through it.
+ * MASQUE CONNECT-UDP / CONNECT-IP test client (RFC 9298, RFC 9484).
+ * Connects to a MASQUE proxy via H3 and establishes a tunnel.
+ *
+ * CONNECT-UDP: sends/receives UDP datagrams via QUIC DATAGRAMs.
+ * CONNECT-IP (-I): sends/receives IP packets via QUIC DATAGRAMs,
+ *                   receives control capsules on the H3 stream.
  *
  * Usage:
  *   masque_client -a <proxy_addr> -p <proxy_port> \
  *                 -T <target_host> -P <target_port> \
- *                 [-d <data_to_send>] [-k] [-l <log_level>]
+ *                 [-d <data_to_send>] [-I] [-S] [-l <log_level>]
  *
- * Interop target: quic-go/masque-go proxy
+ * Interop targets:
+ *   CONNECT-UDP: quic-go/masque-go proxy
+ *   CONNECT-IP:  quic-go/connect-ip-go proxy
  */
 
 #define _GNU_SOURCE
@@ -353,36 +358,74 @@ masque_tunnel_send_dgram(masque_tunnel_t *tun, const uint8_t *data, size_t len)
 }
 
 /* ──────────────────────────────────────────────────────────── */
-/*  Tunnel: send IP payload via Capsule Protocol (CONNECT-IP)   */
+/*  CONNECT-IP: build a minimal IPv4 ICMP echo request packet  */
 /* ──────────────────────────────────────────────────────────── */
 
-static int
-masque_tunnel_send_capsule(masque_tunnel_t *tun, const uint8_t *data, size_t len)
+static uint16_t
+masque_ip_checksum(const uint8_t *data, size_t len)
 {
-    if (!tun->response_ok) {
-        printf("[masque] Cannot send capsule: tunnel not established\n");
-        return -1;
+    uint32_t sum = 0;
+    for (size_t i = 0; i + 1 < len; i += 2) {
+        sum += ((uint16_t)data[i] << 8) | data[i + 1];
     }
-
-    /* Encode as DATAGRAM capsule (type=0x00) on the H3 stream body */
-    uint8_t capsule_buf[65536];
-    size_t cap_len = masque_capsule_encode(
-        capsule_buf, sizeof(capsule_buf),
-        MASQUE_CAPSULE_DATAGRAM, data, len);
-    if (cap_len == 0) {
-        printf("[masque] Failed to encode capsule (too large?)\n");
-        return -1;
+    if (len & 1) {
+        sum += (uint16_t)data[len - 1] << 8;
     }
-
-    ssize_t ret = xqc_h3_request_send_body(tun->h3_request,
-                                            capsule_buf, cap_len, 0);
-    if (ret < 0) {
-        printf("[masque] capsule send error: %zd\n", ret);
-        return (int)ret;
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
     }
+    return (uint16_t)~sum;
+}
 
-    printf("[masque] Sent capsule: type=DATAGRAM, %zu bytes payload\n", len);
-    return 0;
+/**
+ * Build a minimal IPv4 ICMP Echo Request packet.
+ * Returns the total packet length, or 0 on error.
+ */
+static size_t
+masque_build_icmp_echo(uint8_t *buf, size_t buflen,
+                       uint8_t src_ip[4], uint8_t dst_ip[4])
+{
+    /* IPv4 header (20) + ICMP echo (8) + 4 bytes data = 32 */
+    const size_t ip_hdr_len = 20;
+    const size_t icmp_len = 12;  /* 8 header + 4 data */
+    const size_t total = ip_hdr_len + icmp_len;
+
+    if (buflen < total) {
+        return 0;
+    }
+    memset(buf, 0, total);
+
+    /* IPv4 header */
+    buf[0] = 0x45;              /* Version=4, IHL=5 (20 bytes) */
+    buf[1] = 0x00;              /* DSCP/ECN */
+    buf[2] = (uint8_t)(total >> 8);
+    buf[3] = (uint8_t)(total & 0xFF);
+    buf[4] = 0x00; buf[5] = 0x01; /* Identification */
+    buf[6] = 0x00; buf[7] = 0x00; /* Flags + Fragment Offset */
+    buf[8] = 64;                /* TTL */
+    buf[9] = 1;                 /* Protocol: ICMP */
+    /* buf[10..11] = header checksum (computed below) */
+    memcpy(buf + 12, src_ip, 4);
+    memcpy(buf + 16, dst_ip, 4);
+
+    uint16_t ip_cksum = masque_ip_checksum(buf, ip_hdr_len);
+    buf[10] = (uint8_t)(ip_cksum >> 8);
+    buf[11] = (uint8_t)(ip_cksum & 0xFF);
+
+    /* ICMP Echo Request */
+    uint8_t *icmp = buf + ip_hdr_len;
+    icmp[0] = 8;                /* Type: Echo Request */
+    icmp[1] = 0;                /* Code */
+    /* icmp[2..3] = checksum (computed below) */
+    icmp[4] = 0x00; icmp[5] = 0x01; /* Identifier */
+    icmp[6] = 0x00; icmp[7] = 0x01; /* Sequence Number */
+    icmp[8] = 'T'; icmp[9] = 'E'; icmp[10] = 'S'; icmp[11] = 'T';
+
+    uint16_t icmp_cksum = masque_ip_checksum(icmp, icmp_len);
+    icmp[2] = (uint8_t)(icmp_cksum >> 8);
+    icmp[3] = (uint8_t)(icmp_cksum & 0xFF);
+
+    return total;
 }
 
 /* ──────────────────────────────────────────────────────────── */
@@ -429,9 +472,24 @@ masque_dgram_read_cb(xqc_h3_conn_t *h3c, const void *data, size_t data_len,
         tun->recv_len += pay_len;
     }
 
-    /* Print as string if printable */
-    if (pay_len > 0 && pay_len < 4096) {
-        printf("[masque] Payload: %.*s\n", (int)pay_len, payload);
+    if (g_connect_ip) {
+        /* CONNECT-IP: payload is an IP packet, show header info */
+        if (pay_len >= 20) {
+            uint8_t version = payload[0] >> 4;
+            uint8_t proto = payload[9];
+            printf("[masque] IP packet: version=%u, proto=%u, "
+                   "src=%u.%u.%u.%u, dst=%u.%u.%u.%u\n",
+                   version, proto,
+                   payload[12], payload[13], payload[14], payload[15],
+                   payload[16], payload[17], payload[18], payload[19]);
+        } else {
+            printf("[masque] IP packet: %zu bytes (too short for header)\n", pay_len);
+        }
+    } else {
+        /* CONNECT-UDP: payload is UDP data, print as string */
+        if (pay_len > 0 && pay_len < 4096) {
+            printf("[masque] Payload: %.*s\n", (int)pay_len, payload);
+        }
     }
 
     tun->recv_done = 1;
@@ -598,12 +656,32 @@ masque_h3_request_read_cb(xqc_h3_request_t *h3r,
                     printf("[masque] %s tunnel established! (status=%d)\n",
                            g_connect_ip ? "CONNECT-IP" : "CONNECT-UDP", status);
 
-                    /* Send the test payload */
+                    /* Send the test payload via QUIC DATAGRAM.
+                     * Both CONNECT-UDP and CONNECT-IP use HTTP Datagrams
+                     * (RFC 9297) for data transfer. The framing is the same:
+                     * [Quarter-Stream-ID][Context-ID=0][Payload]
+                     * CONNECT-UDP payload = UDP data, CONNECT-IP payload = IP packet.
+                     */
                     if (!tun->send_done && tun->send_data && tun->send_data_len > 0) {
                         int ret;
                         if (g_connect_ip) {
-                            ret = masque_tunnel_send_capsule(tun,
-                                (const uint8_t *)tun->send_data, tun->send_data_len);
+                            /* Build a minimal IPv4 ICMP echo request */
+                            uint8_t src_ip[4] = {10, 0, 0, 2};
+                            uint8_t dst_ip[4] = {10, 0, 0, 1};
+                            uint8_t ip_pkt[64];
+                            size_t ip_len = masque_build_icmp_echo(
+                                ip_pkt, sizeof(ip_pkt), src_ip, dst_ip);
+                            if (ip_len > 0) {
+                                printf("[masque] Sending ICMP echo request: "
+                                       "%u.%u.%u.%u -> %u.%u.%u.%u (%zu bytes)\n",
+                                       src_ip[0], src_ip[1], src_ip[2], src_ip[3],
+                                       dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3],
+                                       ip_len);
+                                ret = masque_tunnel_send_dgram(tun, ip_pkt, ip_len);
+                            } else {
+                                printf("[masque] Failed to build IP packet\n");
+                                ret = -1;
+                            }
                         } else {
                             ret = masque_tunnel_send_dgram(tun,
                                 (const uint8_t *)tun->send_data, tun->send_data_len);
@@ -647,6 +725,7 @@ masque_h3_request_read_cb(xqc_h3_request_t *h3r,
                            cap_type, pay_len);
 
                     if (cap_type == MASQUE_CAPSULE_ADDRESS_ASSIGN && pay_len > 0) {
+                        /* Control capsule: IP address assignment */
                         uint64_t req_id;
                         uint8_t ip_ver, ip_addr[16], pfx_len;
                         size_t ip_addr_len;
@@ -663,10 +742,12 @@ masque_h3_request_read_cb(xqc_h3_request_t *h3r,
                                        " IPv6=.../%u\n", req_id, pfx_len);
                             }
                         }
-                    } else if (cap_type == MASQUE_CAPSULE_DATAGRAM && pay_len > 0) {
-                        printf("[masque] Capsule payload: %.*s\n",
-                               (int)pay_len, body_buf + off + pay_off);
-                        tun->recv_done = 1;
+                    } else if (cap_type == MASQUE_CAPSULE_ROUTE_ADVERTISEMENT) {
+                        /* Control capsule: route advertisement */
+                        printf("[masque] ROUTE_ADVERTISEMENT: %zu bytes\n", pay_len);
+                    } else {
+                        printf("[masque] Unknown capsule type=%" PRIu64
+                               " (%zu bytes)\n", cap_type, pay_len);
                     }
 
                     off += cap_total;
@@ -677,11 +758,6 @@ masque_h3_request_read_cb(xqc_h3_request_t *h3r,
         }
         if (fin) {
             printf("[masque] Stream FIN received\n");
-            if (g_connect_ip && tun->recv_done) {
-                printf("[masque] CONNECT-IP: data received, closing\n");
-                xqc_h3_request_close(tun->h3_request);
-                xqc_h3_conn_close(conn->ctx->engine, &conn->cid);
-            }
         }
     }
 
