@@ -239,6 +239,50 @@ run_connectip_tests() {
     echo ""
 }
 
+# ── Test: Local E2E (test_server + test_client) ──
+
+run_local_e2e_tests() {
+    echo "── Local E2E Tests ──"
+
+    local TEST_SERVER="$BUILD_DIR/tests/test_server"
+    local TEST_CLIENT="$BUILD_DIR/tests/test_client"
+
+    if [ ! -x "$TEST_SERVER" ] || [ ! -x "$TEST_CLIENT" ]; then
+        skip "test_server or test_client not found"
+        echo ""
+        return
+    fi
+
+    # Test: MASQUE CONNECT-IP single path (test case 800)
+    # test_server expects server.crt/server.key in cwd
+    cd "$BUILD_DIR"
+    "$TEST_SERVER" -x 800 -p 18443 -l e > /dev/null 2>&1 &
+    local server_pid=$!
+    cleanup_pids+=("$server_pid")
+    sleep 1
+
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+        fail "MASQUE local E2E: test_server failed to start"
+        echo ""
+        return
+    fi
+
+    local output exit_code
+    output=$(timeout 15 "$TEST_CLIENT" -x 800 -a 127.0.0.1 -p 18443 -1 2>&1) && exit_code=0 || exit_code=$?
+
+    kill "$server_pid" 2>/dev/null; wait "$server_pid" 2>/dev/null || true
+    cd "$ROOT_DIR"
+
+    if echo "$output" | grep -q "\[masque-e2e\] PASS"; then
+        pass "MASQUE CONNECT-IP local E2E (single path)"
+    else
+        fail "MASQUE CONNECT-IP local E2E (single path, exit=$exit_code)"
+        echo "$output" | grep "masque-e2e" | tail -5
+    fi
+
+    echo ""
+}
+
 # ── Main ──
 
 MODE="${1:-all}"
@@ -253,13 +297,17 @@ case "$MODE" in
     connectip)
         run_connectip_tests
         ;;
+    local)
+        run_local_e2e_tests
+        ;;
     all)
         run_unit_tests
         run_cli_tests
+        run_local_e2e_tests
         run_connectip_tests
         ;;
     *)
-        echo "Usage: $0 [unit|cli|connectip|all]"
+        echo "Usage: $0 [unit|cli|connectip|local|all]"
         exit 1
         ;;
 esac
