@@ -1073,13 +1073,16 @@ xqc_int_t xqc_h3_ext_capsule_decode(
     size_t *bytes_consumed);
 
 /**
- * Parse an ADDRESS_ASSIGN capsule payload (RFC 9484).
+ * Parse a single entry from an ADDRESS_ASSIGN capsule payload (RFC 9484).
+ * Call in a loop, advancing by bytes_consumed each iteration, to handle
+ * capsules containing multiple assigned addresses.
  */
 XQC_EXPORT_PUBLIC_API
 xqc_int_t xqc_h3_ext_connectip_parse_address_assign(
     const uint8_t *payload, size_t paylen,
     uint64_t *request_id, uint8_t *ip_version,
-    uint8_t *ip_addr, size_t *ip_addr_len, uint8_t *prefix_len);
+    uint8_t *ip_addr, size_t *ip_addr_len, uint8_t *prefix_len,
+    size_t *bytes_consumed);
 
 /**
  * Build an ADDRESS_REQUEST capsule payload (RFC 9484).
@@ -1099,6 +1102,15 @@ xqc_int_t xqc_h3_ext_connectip_parse_route_advertisement(
     const uint8_t *payload, size_t paylen,
     uint8_t *ip_version, uint8_t *start_ip, uint8_t *end_ip,
     size_t *ip_addr_len, uint8_t *ip_protocol, size_t *bytes_consumed);
+
+/**
+ * Validate an IP packet extracted from an HTTP Datagram (RFC 9484 Section 4.6).
+ * Checks IP version field (must be 4 or 6) and minimum header length.
+ * Returns XQC_OK if valid, -XQC_EPARAM if invalid.
+ */
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_h3_ext_masque_validate_ip_packet(
+    const uint8_t *payload, size_t payload_len);
 
 
 #ifdef __cplusplus

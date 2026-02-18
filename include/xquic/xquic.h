@@ -2049,6 +2049,20 @@ XQC_EXPORT_PUBLIC_API
 size_t xqc_datagram_get_mss(xqc_connection_t *conn);
 
 /**
+ * @brief get the path-specific maximum datagram payload size
+ *
+ * In multipath QUIC, different paths may have different MTUs.
+ * This function returns the effective MSS for a specific path,
+ * taking into account the path's max_pkt_out_size.
+ *
+ * @param conn the connection handle
+ * @param path_id the path identifier
+ * @return 0 = path not found or peer does not support datagram, >0 = the max length
+ */
+XQC_EXPORT_PUBLIC_API
+size_t xqc_datagram_get_mss_on_path(xqc_connection_t *conn, uint64_t path_id);
+
+/**
  * Server should set datagram user_data when datagram callbacks
  * @dgram_data: the user_data of all datagram callbacks
  */

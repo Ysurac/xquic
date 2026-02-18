@@ -1,6 +1,4 @@
 /**
- * @copyright Copyright (c) 2022, Alibaba Group Holding Limited
- *
  * Unit tests for MASQUE common utilities (masque_common.h).
  * Tests varint encoding/decoding, HTTP Datagram framing, and MSS calculation.
  */

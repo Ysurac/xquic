@@ -1,6 +1,4 @@
 /**
- * @copyright Copyright (c) 2022, Alibaba Group Holding Limited
- *
  * MASQUE CONNECT-UDP / CONNECT-IP test client (RFC 9298, RFC 9484).
  * Connects to a MASQUE proxy via H3 and establishes a tunnel.
  *

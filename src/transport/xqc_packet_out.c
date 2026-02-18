@@ -75,7 +75,7 @@ error:
             || ((*path)->path_state >= XQC_PATH_STATE_CLOSING)
             || (*path)->app_path_status == XQC_APP_PATH_STATUS_FROZEN) 
         {
-            po->po_path_flag &= ~(XQC_PATH_SPECIFIED_BY_ACK | XQC_PATH_SPECIFIED_BY_PTO | XQC_PATH_SPECIFIED_BY_REINJ | XQC_PATH_SPECIFIED_BY_FEC);
+            po->po_path_flag &= ~(XQC_PATH_SPECIFIED_BY_ACK | XQC_PATH_SPECIFIED_BY_PTO | XQC_PATH_SPECIFIED_BY_REINJ | XQC_PATH_SPECIFIED_BY_FEC | XQC_PATH_SPECIFIED_BY_DATAGRAM);
 
             if (po->po_path_flag) {
                 if ((*path == NULL) 

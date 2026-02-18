@@ -130,16 +130,51 @@ end:
  * @param conn the connection handle 
  * @return 0 = the peer does not support datagram, >0 = the max length
  */
-size_t 
+size_t
 xqc_datagram_get_mss(xqc_connection_t *conn)
 {
     return conn->dgram_mss;
 }
 
+size_t
+xqc_datagram_get_mss_on_path(xqc_connection_t *conn, uint64_t path_id)
+{
+    if (conn == NULL) {
+        return 0;
+    }
+
+    xqc_path_ctx_t *path = xqc_conn_find_path_by_path_id(conn, path_id);
+    if (path == NULL || path->path_state >= XQC_PATH_STATE_CLOSING) {
+        return 0;
+    }
+
+    /* start from connection-level MSS (includes dgram_frame_limit + udp_payload_limit) */
+    size_t mss = conn->dgram_mss;
+
+    /* apply path-specific MTU constraint */
+    if (conn->conn_flag & XQC_CONN_FLAG_CAN_SEND_1RTT) {
+        size_t quic_header_size = xqc_short_packet_header_size(
+            conn->dcid_set.current_dcid.cid_len, XQC_PKTNO_BITS);
+        size_t headroom = quic_header_size + XQC_DATAGRAM_HEADER_BYTES;
+        if (conn->conn_settings.fec_params.fec_encoder_scheme) {
+            headroom += XQC_FEC_SPACE;
+        }
+        size_t path_mtu_limit = 0;
+        if (path->path_max_pkt_out_size >= headroom) {
+            path_mtu_limit = path->path_max_pkt_out_size - headroom;
+        }
+        if (path_mtu_limit < mss) {
+            mss = path_mtu_limit;
+        }
+    }
+
+    return mss;
+}
+
 /*
  * @brief the API to send a datagram over the QUIC connection
- * 
- * @param conn the connection handle 
+ *
+ * @param conn the connection handle
  * @param data the data to be sent
  * @param data_len the length of the data
  * @param *dgram_id the pointer to return the id the datagram
@@ -312,9 +347,11 @@ xqc_datagram_send_on_path(xqc_connection_t *conn, void *data,
         }
     }
 
-    if (conn->dgram_mss < data_len) {
+    size_t path_mss = xqc_datagram_get_mss_on_path(conn, path_id);
+    if (path_mss < data_len) {
         xqc_log(conn->log, XQC_LOG_INFO,
-                "|datagram_is_too_large|data_len:%ud|", data_len);
+                "|datagram_is_too_large|data_len:%ud|path_mss:%ud|path_id:%ui|",
+                data_len, path_mss, path_id);
         return -XQC_EDGRAM_TOO_LARGE;
     }
 

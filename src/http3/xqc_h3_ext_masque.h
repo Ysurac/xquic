@@ -1,6 +1,4 @@
 /**
- * @copyright Copyright (c) 2022, Alibaba Group Holding Limited
- *
  * MASQUE protocol helpers for HTTP/3 Extended CONNECT.
  *
  * Provides:
@@ -130,7 +128,8 @@ xqc_int_t xqc_h3_ext_capsule_decode(
 xqc_int_t xqc_h3_ext_connectip_parse_address_assign(
     const uint8_t *payload, size_t paylen,
     uint64_t *request_id, uint8_t *ip_version,
-    uint8_t *ip_addr, size_t *ip_addr_len, uint8_t *prefix_len);
+    uint8_t *ip_addr, size_t *ip_addr_len, uint8_t *prefix_len,
+    size_t *bytes_consumed);
 
 /**
  * Build an ADDRESS_REQUEST capsule payload (RFC 9484 Section 4.7.2).
@@ -172,5 +171,11 @@ xqc_int_t xqc_h3_ext_connectip_parse_route_advertisement(
     const uint8_t *payload, size_t paylen,
     uint8_t *ip_version, uint8_t *start_ip, uint8_t *end_ip,
     size_t *ip_addr_len, uint8_t *ip_protocol, size_t *bytes_consumed);
+
+/**
+ * Validate IP packet version and minimum header length (RFC 9484 Section 4.6).
+ */
+xqc_int_t xqc_h3_ext_masque_validate_ip_packet(
+    const uint8_t *payload, size_t payload_len);
 
 #endif /* _XQC_H3_EXT_MASQUE_H_INCLUDED_ */

@@ -1,6 +1,4 @@
 /**
- * @copyright Copyright (c) 2022, Alibaba Group Holding Limited
- *
  * MASQUE protocol helpers implementation.
  * See xqc_h3_ext_masque.h for API documentation.
  */
@@ -156,6 +154,9 @@ xqc_h3_ext_capsule_decode(const uint8_t *buf, size_t buflen,
     p += n;
 
     *payload = p;
+    if (len64 > SIZE_MAX) {
+        return -XQC_EPARAM;
+    }
     *payload_len = (size_t)len64;
     *bytes_consumed = (size_t)(p - buf) + (size_t)len64;
     return XQC_OK;
@@ -169,10 +170,12 @@ xqc_h3_ext_connectip_parse_address_assign(const uint8_t *payload, size_t paylen,
                                            uint64_t *request_id,
                                            uint8_t *ip_version,
                                            uint8_t *ip_addr, size_t *ip_addr_len,
-                                           uint8_t *prefix_len)
+                                           uint8_t *prefix_len,
+                                           size_t *bytes_consumed)
 {
     if (payload == NULL || request_id == NULL || ip_version == NULL
-        || ip_addr == NULL || ip_addr_len == NULL || prefix_len == NULL)
+        || ip_addr == NULL || ip_addr_len == NULL || prefix_len == NULL
+        || bytes_consumed == NULL)
     {
         return -XQC_EPARAM;
     }
@@ -209,7 +212,9 @@ xqc_h3_ext_connectip_parse_address_assign(const uint8_t *payload, size_t paylen,
     *ip_addr_len = addr_len;
     p += addr_len;
 
-    *prefix_len = *p;
+    *prefix_len = *p++;
+
+    *bytes_consumed = (size_t)(p - payload);
     return XQC_OK;
 }
 
@@ -301,5 +306,35 @@ xqc_h3_ext_connectip_parse_route_advertisement(const uint8_t *payload,
     *ip_protocol = *p++;
 
     *bytes_consumed = (size_t)(p - payload);
+    return XQC_OK;
+}
+
+
+/* ── IP packet validation (RFC 9484 Section 4.6) ── */
+
+xqc_int_t
+xqc_h3_ext_masque_validate_ip_packet(const uint8_t *payload, size_t payload_len)
+{
+    if (payload == NULL || payload_len < 1) {
+        return -XQC_EPARAM;
+    }
+
+    uint8_t version = (payload[0] >> 4) & 0x0F;
+
+    if (version == 4) {
+        /* IPv4: minimum header is 20 bytes */
+        if (payload_len < 20) {
+            return -XQC_EPARAM;
+        }
+    } else if (version == 6) {
+        /* IPv6: fixed header is 40 bytes */
+        if (payload_len < 40) {
+            return -XQC_EPARAM;
+        }
+    } else {
+        /* RFC 9484: "An IP version field that is neither 4 nor 6" */
+        return -XQC_EPARAM;
+    }
+
     return XQC_OK;
 }

@@ -3059,8 +3059,9 @@ xqc_client_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_notify_
                         uint64_t req_id;
                         uint8_t ip_ver, ip_addr[16], prefix;
                         size_t ip_len = 16;
+                        size_t aa_consumed = 0;
                         xret = xqc_h3_ext_connectip_parse_address_assign(
-                            cap_payload, cap_len, &req_id, &ip_ver, ip_addr, &ip_len, &prefix);
+                            cap_payload, cap_len, &req_id, &ip_ver, ip_addr, &ip_len, &prefix, &aa_consumed);
                         if (xret == XQC_OK) {
                             g_masque_addr_assigned = 1;
                             printf("[masque-e2e] ADDRESS_ASSIGN: req_id=%" PRIu64

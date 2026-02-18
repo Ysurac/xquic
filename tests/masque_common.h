@@ -1,6 +1,4 @@
 /**
- * @copyright Copyright (c) 2022, Alibaba Group Holding Limited
- *
  * MASQUE common utilities for CONNECT-UDP / CONNECT-IP test clients.
  *
  * This header is a compatibility wrapper around the xquic library's
@@ -138,9 +136,10 @@ masque_parse_address_assign(const uint8_t *payload, size_t paylen,
                             uint8_t *ip_addr, size_t *ip_addr_len,
                             uint8_t *prefix_len)
 {
+    size_t consumed = 0;
     xqc_int_t rc = xqc_h3_ext_connectip_parse_address_assign(
         payload, paylen, request_id, ip_version,
-        ip_addr, ip_addr_len, prefix_len);
+        ip_addr, ip_addr_len, prefix_len, &consumed);
     return rc == XQC_OK ? 0 : -1;
 }
 
