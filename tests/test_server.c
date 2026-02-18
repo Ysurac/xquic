@@ -543,6 +543,11 @@ xqc_server_h3_ext_datagram_read_callback(xqc_h3_conn_t *conn, const void *data, 
             printf("[masque-proxy] unframe error: %d (len=%zu)\n", xret, data_len);
             return;
         }
+        /* RFC 9297: silently drop datagrams with unknown Context-ID */
+        if (ctx_id != 0) {
+            printf("[masque-proxy] dropping dgram with unknown context_id=%" PRIu64 "\n", ctx_id);
+            return;
+        }
         printf("[masque-proxy] recv dgram: qsid=%" PRIu64 " ctx=%" PRIu64 " payload=%zu bytes\n",
                qsid, ctx_id, payload_len);
 
@@ -1195,14 +1200,17 @@ xqc_server_masque_send_response(xqc_h3_request_t *h3_request, user_stream_t *use
 
     /* 1. Send 200 response headers (fin=0 — keep stream open) */
     xqc_http_header_t resp_hdrs[] = {
-        { .name  = {.iov_base = ":status",  .iov_len = 7},
-          .value = {.iov_base = "200",       .iov_len = 3},
+        { .name  = {.iov_base = ":status",           .iov_len = 7},
+          .value = {.iov_base = "200",                .iov_len = 3},
+          .flags = 0 },
+        { .name  = {.iov_base = "capsule-protocol",  .iov_len = 16},
+          .value = {.iov_base = "?1",                 .iov_len = 2},
           .flags = 0 },
     };
     xqc_http_headers_t hdrs = {
         .headers  = resp_hdrs,
-        .count    = 1,
-        .capacity = 1,
+        .count    = 2,
+        .capacity = 2,
     };
 
     ret = xqc_h3_request_send_headers(h3_request, &hdrs, 0);

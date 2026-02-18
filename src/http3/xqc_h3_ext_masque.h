@@ -178,4 +178,23 @@ xqc_int_t xqc_h3_ext_connectip_parse_route_advertisement(
 xqc_int_t xqc_h3_ext_masque_validate_ip_packet(
     const uint8_t *payload, size_t payload_len);
 
+/**
+ * Validate a full ROUTE_ADVERTISEMENT capsule payload (RFC 9484 §4.7.3).
+ * Verifies ordering (IP version ASC, protocol ASC) and non-overlapping ranges.
+ *
+ * @param payload  capsule payload (sequence of ROUTE_ADVERTISEMENT entries)
+ * @param paylen   payload length (0 is valid = no routes)
+ * @return XQC_OK if valid, -XQC_EPARAM if malformed or misordered
+ */
+xqc_int_t xqc_h3_ext_connectip_validate_route_advertisement(
+    const uint8_t *payload, size_t paylen);
+
+/**
+ * Check that IPv6 tunnel MTU meets the minimum of 1280 (RFC 9484 §7.2).
+ *
+ * @param tunnel_mtu  the effective MTU of the IP tunnel
+ * @return XQC_OK if >= 1280, -XQC_EPARAM otherwise
+ */
+xqc_int_t xqc_h3_ext_masque_check_ipv6_mtu(size_t tunnel_mtu);
+
 #endif /* _XQC_H3_EXT_MASQUE_H_INCLUDED_ */

@@ -294,9 +294,13 @@ test_address_request_build(void)
 {
     uint8_t buf[64];
 
-    /* Build IPv4 request for any address */
+    /* RFC 9484 §4.7.2: request_id MUST NOT be zero */
     uint8_t any_ip[4] = {0, 0, 0, 0};
     size_t len = masque_build_address_request(buf, sizeof(buf), 0, 4, any_ip, 0);
+    CU_ASSERT_EQUAL(len, 0); /* rejected: request_id == 0 */
+
+    /* Build IPv4 request for any address with valid request_id */
+    len = masque_build_address_request(buf, sizeof(buf), 1, 4, any_ip, 0);
     CU_ASSERT(len > 0);
     CU_ASSERT_EQUAL(len, 1 + 1 + 4 + 1); /* req_id(1) + ip_ver(1) + addr(4) + pfx(1) */
 
@@ -308,7 +312,7 @@ test_address_request_build(void)
                                           &req_id, &ip_ver,
                                           ip_addr, &ip_addr_len, &pfx_len);
     CU_ASSERT_EQUAL(rc, 0);
-    CU_ASSERT_EQUAL(req_id, 0);
+    CU_ASSERT_EQUAL(req_id, 1);
     CU_ASSERT_EQUAL(ip_ver, 4);
     CU_ASSERT_EQUAL(ip_addr_len, 4);
     CU_ASSERT_EQUAL(ip_addr[0], 0);
@@ -349,7 +353,7 @@ test_address_request_build(void)
     uint8_t capsule_buf[128];
     uint8_t req_payload[32];
     size_t req_len = masque_build_address_request(req_payload, sizeof(req_payload),
-                                                    0, 4, any_ip, 0);
+                                                    1, 4, any_ip, 0);
     CU_ASSERT(req_len > 0);
     size_t cap_len = masque_capsule_encode(capsule_buf, sizeof(capsule_buf),
                                             MASQUE_CAPSULE_ADDRESS_REQUEST,
@@ -731,13 +735,10 @@ test_capsule_truncated_payload(void)
     CU_ASSERT_EQUAL(rc, 0);
     CU_ASSERT_EQUAL(pay_len, 20);
 
-    /* But if we give it a buffer shorter than pay_off + pay_len,
-     * the decoder still succeeds (it only parses the header).
-     * Caller must verify: pay_off + pay_len <= buflen */
+    /* If we give it a buffer shorter than header + declared payload length,
+     * the decoder now correctly rejects it (RFC 9297 §3.3 bounds check) */
     rc = masque_capsule_decode(buf, 3, &type, &pay_off, &pay_len);
-    CU_ASSERT_EQUAL(rc, 0);
-    /* pay_off + pay_len > 3, caller must detect this */
-    CU_ASSERT(pay_off + pay_len > 3);
+    CU_ASSERT_EQUAL(rc, -1);
 }
 
 /* ── ADDRESS_ASSIGN: various truncation points ── */

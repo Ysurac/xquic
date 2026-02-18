@@ -1112,6 +1112,20 @@ XQC_EXPORT_PUBLIC_API
 xqc_int_t xqc_h3_ext_masque_validate_ip_packet(
     const uint8_t *payload, size_t payload_len);
 
+/**
+ * Validate a full ROUTE_ADVERTISEMENT capsule payload (RFC 9484 §4.7.3).
+ * Verifies ordering and non-overlapping ranges.
+ */
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_h3_ext_connectip_validate_route_advertisement(
+    const uint8_t *payload, size_t paylen);
+
+/**
+ * Check that IPv6 tunnel MTU meets the RFC 9484 §7.2 minimum of 1280 bytes.
+ */
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_h3_ext_masque_check_ipv6_mtu(size_t tunnel_mtu);
+
 
 #ifdef __cplusplus
 }

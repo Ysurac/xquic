@@ -159,6 +159,11 @@ xqc_h3_ext_capsule_decode(const uint8_t *buf, size_t buflen,
     }
     *payload_len = (size_t)len64;
     *bytes_consumed = (size_t)(p - buf) + (size_t)len64;
+
+    /* RFC 9297 §3.3: verify declared length is self-consistent with buffer */
+    if (*bytes_consumed > buflen) {
+        return -XQC_EPARAM;
+    }
     return XQC_OK;
 }
 
@@ -227,6 +232,11 @@ xqc_h3_ext_connectip_build_address_request(uint8_t *buf, size_t buflen,
                                             uint8_t prefix_len)
 {
     if (buf == NULL || written == NULL || ip_addr == NULL) {
+        return -XQC_EPARAM;
+    }
+
+    /* RFC 9484 §4.7.2: Request IDs MUST NOT be zero */
+    if (request_id == 0) {
         return -XQC_EPARAM;
     }
 
@@ -336,5 +346,93 @@ xqc_h3_ext_masque_validate_ip_packet(const uint8_t *payload, size_t payload_len)
         return -XQC_EPARAM;
     }
 
+    return XQC_OK;
+}
+
+
+/* ── ROUTE_ADVERTISEMENT ordering validation (RFC 9484 §4.7.3) ── */
+
+xqc_int_t
+xqc_h3_ext_connectip_validate_route_advertisement(const uint8_t *payload,
+                                                    size_t paylen)
+{
+    if (payload == NULL && paylen > 0) {
+        return -XQC_EPARAM;
+    }
+
+    /* RFC 9484 §4.7.3: empty ROUTE_ADVERTISEMENT is valid (no routes) */
+    if (paylen == 0) {
+        return XQC_OK;
+    }
+
+    const uint8_t *p = payload;
+    size_t remaining = paylen;
+
+    uint8_t prev_ip_version = 0;
+    uint8_t prev_ip_protocol = 0;
+    uint8_t prev_end_ip[16];
+    size_t  prev_addr_len = 0;
+    int     entry_count = 0;
+
+    while (remaining > 0) {
+        uint8_t ip_version, ip_protocol;
+        uint8_t start_ip[16], end_ip[16];
+        size_t  ip_addr_len, consumed;
+
+        xqc_int_t ret = xqc_h3_ext_connectip_parse_route_advertisement(
+            p, remaining, &ip_version, start_ip, end_ip,
+            &ip_addr_len, &ip_protocol, &consumed);
+        if (ret != XQC_OK) {
+            return ret;
+        }
+
+        /* RFC 9484 §4.7.3: start_ip must be <= end_ip */
+        if (memcmp(start_ip, end_ip, ip_addr_len) > 0) {
+            return -XQC_EPARAM;
+        }
+
+        /* RFC 9484 §4.7.3: entries MUST be ordered and non-overlapping */
+        if (entry_count > 0) {
+            if (ip_version < prev_ip_version) {
+                return -XQC_EPARAM;
+            }
+            if (ip_version == prev_ip_version) {
+                if (ip_protocol < prev_ip_protocol) {
+                    return -XQC_EPARAM;
+                }
+                if (ip_protocol == prev_ip_protocol
+                    && ip_addr_len == prev_addr_len)
+                {
+                    /* Current start_ip must be > previous end_ip */
+                    if (memcmp(start_ip, prev_end_ip, ip_addr_len) <= 0) {
+                        return -XQC_EPARAM;
+                    }
+                }
+            }
+        }
+
+        prev_ip_version = ip_version;
+        prev_ip_protocol = ip_protocol;
+        memcpy(prev_end_ip, end_ip, ip_addr_len);
+        prev_addr_len = ip_addr_len;
+        entry_count++;
+
+        p += consumed;
+        remaining -= consumed;
+    }
+
+    return XQC_OK;
+}
+
+
+/* ── IPv6 tunnel MTU check (RFC 9484 §7.2) ── */
+
+xqc_int_t
+xqc_h3_ext_masque_check_ipv6_mtu(size_t tunnel_mtu)
+{
+    /* RFC 9484 §7.2: IPv6 requires minimum path MTU of 1280 */
+    if (tunnel_mtu < 1280) {
+        return -XQC_EPARAM;
+    }
     return XQC_OK;
 }

@@ -736,6 +736,12 @@ xqc_client_h3_ext_datagram_read_callback(xqc_h3_conn_t *conn, const void *data, 
             return;
         }
 
+        /* RFC 9297: silently drop datagrams with unknown Context-ID */
+        if (ctx_id != 0) {
+            printf("[masque-e2e] dropping dgram with unknown context_id=%" PRIu64 "\n", ctx_id);
+            return;
+        }
+
         /* Verify quarter-stream-ID matches our tunnel */
         uint64_t expected_qsid = g_masque_stream_id / 4;
         if (qsid != expected_qsid) {

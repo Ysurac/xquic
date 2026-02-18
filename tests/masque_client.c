@@ -432,7 +432,7 @@ masque_tunnel_send_address_request(masque_tunnel_t *tun)
     uint8_t any_ip[4] = {0, 0, 0, 0};
     size_t pay_len = masque_build_address_request(
         payload, sizeof(payload),
-        0,      /* request_id = 0 */
+        1,      /* request_id (MUST NOT be zero per RFC 9484 §4.7.2) */
         4,      /* IPv4 */
         any_ip, /* any address */
         0       /* any prefix */
@@ -521,6 +521,12 @@ masque_dgram_read_cb(xqc_h3_conn_t *h3c, const void *data, size_t data_len,
     if (masque_unframe_udp_datagram(data, data_len, &qsid, &ctx_id,
                                     &pay_off, &pay_len) < 0) {
         printf("[masque] dgram_read: failed to unframe datagram\n");
+        return;
+    }
+
+    /* RFC 9297: silently drop datagrams with unknown Context-ID */
+    if (ctx_id != 0) {
+        printf("[masque] dgram_read: dropping unknown context_id=%" PRIu64 "\n", ctx_id);
         return;
     }
 

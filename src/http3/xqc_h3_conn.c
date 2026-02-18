@@ -735,6 +735,12 @@ xqc_h3_conn_on_settings_entry_received(uint64_t identifier, uint64_t value, void
         break;
 
     case XQC_H3_SETTINGS_H3_DATAGRAM:
+        if (value > 1) {
+            xqc_log(h3c->log, XQC_LOG_ERROR,
+                    "|SETTINGS_H3_DATAGRAM invalid value:%ui|", value);
+            XQC_H3_CONN_ERR(h3c, H3_SETTINGS_ERROR, -XQC_H3_SETTING_ERROR);
+            return -XQC_H3_SETTING_ERROR;
+        }
         h3c->peer_h3_conn_settings.h3_datagram = value;
         xqc_log(h3c->log, XQC_LOG_DEBUG, "|peer h3_datagram:%ui|", value);
         break;
