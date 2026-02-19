@@ -1564,6 +1564,15 @@ typedef struct xqc_path_metrics_s {
 
     uint64_t            path_srtt;
     uint8_t             path_app_status;
+
+    /* Extended metrics for multipath scheduling (mpvpn WLB) */
+    uint64_t            path_min_rtt;           /* minimum RTT (usec) */
+    uint64_t            path_cwnd;              /* congestion window (bytes) */
+    uint64_t            path_bytes_in_flight;   /* bytes in flight */
+    uint64_t            path_est_bw;            /* estimated bandwidth (bytes/sec) */
+    uint64_t            path_pacing_rate;       /* pacing rate (bytes/sec) */
+    uint32_t            path_lost_count;        /* packets lost on this path */
+    uint8_t             path_state;             /* XQC_PATH_STATE_* */
 } xqc_path_metrics_t;
 
 /**
