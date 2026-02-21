@@ -196,11 +196,18 @@ late_ipow(double base, int n)
 }
 
 /**
- * Iterative LATE estimate for QUIC Datagrams.
+ * Iterative LATE estimate for QUIC Datagrams, aligned with BBR2+ behavior.
  *
  * Returns expected number of packets delivered within time budget T.
  * Models per-round binomial loss with expected-value cwnd transitions
  * (no FR/RTO since datagrams are unreliable).
+ *
+ * BBR2+ alignment (xqc_bbr2.c):
+ *   - loss_thresh = 0.02: loss below 2% is tolerated (no cwnd reduction)
+ *   - beta = 0.3: cwnd shrinks to 70% on loss (not 50% like Reno)
+ *   - fast_convergence: lower bounds reset every 5-9 RTTs, so we cap
+ *     the number of loss-reduction rounds to avoid compounding beyond
+ *     what BBR2+ actually sustains
  *
  * @param T_us      time budget (microseconds)
  * @param rtt_us    path RTT (microseconds)
@@ -218,6 +225,11 @@ late_estimate_dgram(double T_us, double rtt_us,
     if (loss < 0.0) loss = 0.0;
     if (loss > 1.0) loss = 1.0;
 
+    /* BBR2 tolerates up to 2% random loss without reducing (xqc_bbr2_loss_thresh) */
+    if (loss < 0.02) {
+        loss = 0.0;
+    }
+
     /* T < RTT/2 — nothing delivered */
     if (T_us < rtt_us / 2.0) {
         return 0.0;
@@ -227,6 +239,15 @@ late_estimate_dgram(double T_us, double rtt_us,
     double w = (double)cwnd;
     double sst = (double)ssthresh;
     double remaining = T_us;
+    int rounds = 0;
+
+    /*
+     * BBR2+ fast_convergence resets bw_lo/inflight_lo every 5-9 RTTs
+     * (xqc_bbr2_fast_convergence_probe_round_base=4, rand=4).
+     * Cap loss-reduction rounds to 7 (midpoint) to prevent unrealistic
+     * compounding beyond a single probe cycle.
+     */
+    const int max_loss_rounds = 7;
 
     while (remaining >= rtt_us / 2.0 && w >= 0.5) {
         /* Packets delivered this round: E[successes] = w·(1-l) */
@@ -245,8 +266,19 @@ late_estimate_dgram(double T_us, double rtt_us,
             w_grow = w + 1.0;
         }
 
-        /* cwnd shrink (loss): halve, floor at 1 */
-        double w_shrink = w / 2.0;
+        /*
+         * cwnd shrink (loss): BBR2 beta=0.3 → retain 70%
+         * (xqc_bbr2_inflight_lo_beta = 0.3, applied as 1-beta = 0.7)
+         *
+         * After max_loss_rounds, stop compounding shrink — BBR2+ would
+         * have reset lower bounds and re-probed by then.
+         */
+        double w_shrink;
+        if (rounds < max_loss_rounds) {
+            w_shrink = w * 0.7;
+        } else {
+            w_shrink = w;  /* no further reduction after reset cycle */
+        }
         if (w_shrink < 1.0) w_shrink = 1.0;
 
         /* Expected-value cwnd for next round */
@@ -256,6 +288,7 @@ late_estimate_dgram(double T_us, double rtt_us,
         w = w_next;
         sst = sst_next;
         remaining -= rtt_us;
+        rounds++;
     }
 
     return N;
