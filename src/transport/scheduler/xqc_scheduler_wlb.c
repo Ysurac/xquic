@@ -38,6 +38,7 @@
 #define WLB_FLOW_TABLE_MASK   (WLB_FLOW_TABLE_SIZE - 1)
 #define WLB_MAX_PROBE         16      /* linear probe limit */
 #define WLB_FLOW_EXPIRE_US    (60ULL * 1000000)  /* 60 s idle expiry */
+#define WLB_LOSS_EVICT_THRESH 0.02  /* evict flows from paths with loss >= 2% (BBR2+ aligned) */
 
 /* ---------- data types ---------- */
 
@@ -63,6 +64,9 @@ typedef struct {
     uint64_t             last_expire_ts;  /* throttle expire scans to 1/sec */
     xqc_log_t           *log;
 } xqc_wlb_scheduler_t;
+
+/* Forward declaration — used by wlb_flow_expire() for loss-triggered eviction */
+static xqc_path_ctx_t *wlb_find_path_ctx(xqc_connection_t *conn, uint64_t path_id);
 
 /* ================================================================
  *  Flow table helpers
@@ -122,20 +126,43 @@ wlb_flow_insert(xqc_wlb_scheduler_t *s, uint32_t hash, uint64_t path_id, uint64_
 }
 
 /**
- * Expire idle flow entries.  Scans the full table at most once per second
- * to amortize cost.
+ * Expire idle flow entries and evict flows from lossy paths.
+ *
+ * Scans the full table at most once per second to amortize cost.
+ * In addition to idle expiry, evicts flows pinned to paths whose loss
+ * rate exceeds WLB_LOSS_EVICT_THRESH (aligned with BBR2+ loss_thresh).
+ * Evicted flows are reassigned via WRR on their next packet, and since
+ * the lossy path has low LATE weight, most will land on healthy paths.
  */
 static void
-wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us)
+wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
 {
     if (!s->flows || (now_us - s->last_expire_ts) < 1000000) {
         return;
     }
     s->last_expire_ts = now_us;
+
     for (int i = 0; i < WLB_FLOW_TABLE_SIZE; i++) {
         wlb_flow_entry_t *e = &s->flows[i];
-        if (e->hash != 0 && (now_us - e->last_ts) > WLB_FLOW_EXPIRE_US) {
+        if (e->hash == 0) {
+            continue;
+        }
+
+        /* Idle expiry */
+        if ((now_us - e->last_ts) > WLB_FLOW_EXPIRE_US) {
             e->hash = 0;
+            continue;
+        }
+
+        /* Loss-triggered eviction: move flows off paths with high loss.
+         * The evicted flow will be reassigned via WRR on its next packet.
+         * LATE weight ensures the lossy path gets very few new flows. */
+        xqc_path_ctx_t *path = wlb_find_path_ctx(conn, e->path_id);
+        if (path) {
+            double loss = xqc_path_recent_loss_rate(path) / 100.0;
+            if (loss >= WLB_LOSS_EVICT_THRESH) {
+                e->hash = 0;
+            }
         }
     }
 }
@@ -593,7 +620,7 @@ xqc_wlb_scheduler_get_path(void *scheduler,
 
     /* Flow table lookup — reuse existing flow→path pinning (TCP only) */
     if (pin_flow) {
-        wlb_flow_expire(s, now_us);
+        wlb_flow_expire(s, now_us, conn);
 
         wlb_flow_entry_t *entry = wlb_flow_lookup(s, packet_out->po_flow_hash);
         if (entry) {
