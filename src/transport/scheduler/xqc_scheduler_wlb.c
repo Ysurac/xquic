@@ -40,6 +40,17 @@
 #define WLB_FLOW_EXPIRE_US    (60ULL * 1000000)  /* 60 s idle expiry */
 #define WLB_LOSS_EVICT_THRESH 0.02  /* evict flows from paths with loss >= 2% (BBR2+ aligned) */
 
+/*
+ * Tombstone marker for deleted flow table entries.
+ * Using 0xFFFFFFFF which equals WLB_FLOW_HASH_UNPINNED — safe because
+ * unpinned packets never enter the flow table (pin_flow == false).
+ *
+ * Semantics:  hash == 0          → empty slot (end of probe chain)
+ *             hash == TOMBSTONE  → deleted slot (continue probing)
+ *             hash == other      → valid entry
+ */
+#define WLB_FLOW_TOMBSTONE    0xFFFFFFFFU
+
 /* ---------- data types ---------- */
 
 /** Flow table entry — maps an inner-flow hash to a QUIC path. */
@@ -100,6 +111,7 @@ wlb_flow_lookup(xqc_wlb_scheduler_t *s, uint32_t hash)
 
 /**
  * Insert or update a flow→path mapping.
+ * Reuses tombstone slots left by eviction.
  * On probe-region exhaustion, overwrites the first slot (LRU-ish eviction).
  */
 static void
@@ -111,7 +123,7 @@ wlb_flow_insert(xqc_wlb_scheduler_t *s, uint32_t hash, uint64_t path_id, uint64_
     uint32_t idx = hash & WLB_FLOW_TABLE_MASK;
     for (int i = 0; i < WLB_MAX_PROBE; i++) {
         wlb_flow_entry_t *e = &s->flows[(idx + i) & WLB_FLOW_TABLE_MASK];
-        if (e->hash == 0 || e->hash == hash) {
+        if (e->hash == 0 || e->hash == WLB_FLOW_TOMBSTONE || e->hash == hash) {
             e->hash    = hash;
             e->path_id = path_id;
             e->last_ts = now_us;
@@ -126,13 +138,15 @@ wlb_flow_insert(xqc_wlb_scheduler_t *s, uint32_t hash, uint64_t path_id, uint64_
 }
 
 /**
- * Expire idle flow entries and evict flows from lossy paths.
+ * Expire idle flow entries and evict flows from lossy or dead paths.
  *
  * Scans the full table at most once per second to amortize cost.
- * In addition to idle expiry, evicts flows pinned to paths whose loss
- * rate exceeds WLB_LOSS_EVICT_THRESH (aligned with BBR2+ loss_thresh).
- * Evicted flows are reassigned via WRR on their next packet, and since
- * the lossy path has low LATE weight, most will land on healthy paths.
+ * Uses tombstones (not zero) to preserve open-addressing probe chains.
+ *
+ * Eviction triggers:
+ *   1. Idle for > 60 seconds
+ *   2. Pinned path is no longer active (removed/frozen)
+ *   3. Pinned path loss >= 2% (BBR2+ loss_thresh)
  */
 static void
 wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
@@ -144,25 +158,28 @@ wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
 
     for (int i = 0; i < WLB_FLOW_TABLE_SIZE; i++) {
         wlb_flow_entry_t *e = &s->flows[i];
-        if (e->hash == 0) {
+        if (e->hash == 0 || e->hash == WLB_FLOW_TOMBSTONE) {
             continue;
         }
 
         /* Idle expiry */
         if ((now_us - e->last_ts) > WLB_FLOW_EXPIRE_US) {
-            e->hash = 0;
+            e->hash = WLB_FLOW_TOMBSTONE;
             continue;
         }
 
-        /* Loss-triggered eviction: move flows off paths with high loss.
-         * The evicted flow will be reassigned via WRR on its next packet.
-         * LATE weight ensures the lossy path gets very few new flows. */
+        /* Check pinned path status */
         xqc_path_ctx_t *path = wlb_find_path_ctx(conn, e->path_id);
-        if (path) {
-            double loss = xqc_path_recent_loss_rate(path) / 100.0;
-            if (loss >= WLB_LOSS_EVICT_THRESH) {
-                e->hash = 0;
-            }
+        if (!path) {
+            /* Path removed or frozen → evict immediately */
+            e->hash = WLB_FLOW_TOMBSTONE;
+            continue;
+        }
+
+        /* Loss-triggered eviction: move flows off paths with high loss */
+        double loss = xqc_path_recent_loss_rate(path) / 100.0;
+        if (loss >= WLB_LOSS_EVICT_THRESH) {
+            e->hash = WLB_FLOW_TOMBSTONE;
         }
     }
 }
