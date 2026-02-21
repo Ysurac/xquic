@@ -26,7 +26,6 @@
 #include "src/transport/xqc_send_ctl.h"
 #include "src/transport/xqc_multipath.h"
 #include "src/common/xqc_time.h"
-#include <stdlib.h>
 
 /* ---------- constants ---------- */
 
@@ -71,7 +70,7 @@ typedef struct {
 typedef struct {
     wlb_path_weight_t   paths[WLB_MAX_PATHS];
     int                  n_paths;
-    wlb_flow_entry_t    *flows;          /* heap-allocated flow table */
+    wlb_flow_entry_t     flows[WLB_FLOW_TABLE_SIZE];
     uint64_t             last_expire_ts;  /* throttle expire scans to 1/sec */
     xqc_log_t           *log;
 } xqc_wlb_scheduler_t;
@@ -93,7 +92,7 @@ static xqc_path_ctx_t *wlb_find_path_ctx(xqc_connection_t *conn, uint64_t path_i
 static wlb_flow_entry_t *
 wlb_flow_lookup(xqc_wlb_scheduler_t *s, uint32_t hash)
 {
-    if (hash == 0 || !s->flows) {
+    if (hash == 0) {
         return NULL;
     }
     uint32_t idx = hash & WLB_FLOW_TABLE_MASK;
@@ -117,7 +116,7 @@ wlb_flow_lookup(xqc_wlb_scheduler_t *s, uint32_t hash)
 static void
 wlb_flow_insert(xqc_wlb_scheduler_t *s, uint32_t hash, uint64_t path_id, uint64_t now_us)
 {
-    if (hash == 0 || !s->flows) {
+    if (hash == 0) {
         return;
     }
     uint32_t idx = hash & WLB_FLOW_TABLE_MASK;
@@ -151,7 +150,7 @@ wlb_flow_insert(xqc_wlb_scheduler_t *s, uint32_t hash, uint64_t path_id, uint64_
 static void
 wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
 {
-    if (!s->flows || (now_us - s->last_expire_ts) < 1000000) {
+    if ((now_us - s->last_expire_ts) < 1000000) {
         return;
     }
     s->last_expire_ts = now_us;
@@ -601,7 +600,6 @@ xqc_wlb_scheduler_init(void *scheduler, xqc_log_t *log, xqc_scheduler_params_t *
     xqc_wlb_scheduler_t *s = (xqc_wlb_scheduler_t *)scheduler;
     memset(s, 0, sizeof(*s));
     s->log = log;
-    s->flows = calloc(WLB_FLOW_TABLE_SIZE, sizeof(wlb_flow_entry_t));
 }
 
 /* Sentinel: per-packet WRR without flow pinning (UDP/QUIC datagrams) */
@@ -678,6 +676,17 @@ xqc_wlb_scheduler_get_path(void *scheduler,
 
     /* WRR assignment — pin flow to selected path only for TCP */
     uint64_t sel_path_id = wlb_wrr_select(s, conn, packet_out, check_cwnd);
+    if (sel_path_id == UINT64_MAX) {
+        /*
+         * If no path could be selected, force a fresh round once.
+         * This avoids stalling on stale deficits when one path keeps a
+         * positive deficit but is temporarily unsendable.
+         */
+        wlb_refresh_paths(s, conn);
+        wlb_start_round(s);
+        sel_path_id = wlb_wrr_select(s, conn, packet_out, check_cwnd);
+    }
+
     if (sel_path_id != UINT64_MAX) {
         if (pin_flow) {
             wlb_flow_insert(s, packet_out->po_flow_hash, sel_path_id, now_us);
