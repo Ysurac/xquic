@@ -1334,6 +1334,9 @@ xqc_write_datagram_frame_to_packet(xqc_connection_t *conn, xqc_pkt_type_t pkt_ty
         packet_out->po_path_flag |= XQC_PATH_SPECIFIED_BY_DATAGRAM;
     }
 
+    /* WLB scheduler: copy flow hash from connection for flow-affinity scheduling */
+    packet_out->po_flow_hash = conn->next_dgram_flow_hash;
+
     return XQC_OK;
 }
 

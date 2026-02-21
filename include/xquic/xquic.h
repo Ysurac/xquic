@@ -1067,9 +1067,18 @@ XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_minrtt_sched
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_backup_scheduler_cb;
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_backup_fec_scheduler_cb;
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_rap_scheduler_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_wlb_scheduler_cb;
 #ifdef XQC_ENABLE_MP_INTEROP
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_interop_scheduler_cb;
 #endif
+
+/**
+ * @brief Set flow hash hint for WLB scheduler before calling datagram_send().
+ * The WLB scheduler uses this hash for flow-affinity path selection.
+ * Must be called before each xqc_h3_ext_datagram_send() call.
+ */
+XQC_EXPORT_PUBLIC_API
+void xqc_conn_set_dgram_flow_hash(xqc_connection_t *conn, uint32_t flow_hash);
 
 typedef enum {
     XQC_REINJ_UNACK_AFTER_SCHED   = 1 << 0,
