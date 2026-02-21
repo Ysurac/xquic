@@ -560,12 +560,15 @@ xqc_wlb_scheduler_init(void *scheduler, xqc_log_t *log, xqc_scheduler_params_t *
     s->flows = calloc(WLB_FLOW_TABLE_SIZE, sizeof(wlb_flow_entry_t));
 }
 
+/* Sentinel: per-packet WRR without flow pinning (UDP/QUIC datagrams) */
+#define WLB_FLOW_HASH_UNPINNED  0xFFFFFFFFU
+
 /**
  * Main scheduling entry point.
  *
- * 1. Non-datagram packets (po_flow_hash == 0) → MinRTT fallback.
- * 2. Check flow table for an existing pinning — reuse if path is available.
- * 3. Otherwise, WRR selects a new path and pins the flow to it.
+ * 1. po_flow_hash == 0 (non-datagram packets) → MinRTT fallback.
+ * 2. po_flow_hash == UNPINNED (UDP/QUIC)      → WRR without flow table.
+ * 3. Otherwise (TCP)                           → flow table lookup + WRR with pinning.
  */
 static xqc_path_ctx_t *
 xqc_wlb_scheduler_get_path(void *scheduler,
@@ -583,19 +586,24 @@ xqc_wlb_scheduler_get_path(void *scheduler,
         *cc_blocked = XQC_FALSE;
     }
 
+    /* TCP flows are pinned to paths; UDP/QUIC use per-packet WRR */
+    xqc_bool_t pin_flow = (packet_out->po_flow_hash != WLB_FLOW_HASH_UNPINNED);
+
     uint64_t now_us = xqc_monotonic_timestamp();
 
-    /* Flow table lookup — reuse existing flow→path pinning */
-    wlb_flow_expire(s, now_us);
+    /* Flow table lookup — reuse existing flow→path pinning (TCP only) */
+    if (pin_flow) {
+        wlb_flow_expire(s, now_us);
 
-    wlb_flow_entry_t *entry = wlb_flow_lookup(s, packet_out->po_flow_hash);
-    if (entry) {
-        xqc_path_ctx_t *path = wlb_find_path_ctx(conn, entry->path_id);
-        if (path && xqc_scheduler_check_path_can_send(path, packet_out, check_cwnd)) {
-            entry->last_ts = now_us;
-            return path;
+        wlb_flow_entry_t *entry = wlb_flow_lookup(s, packet_out->po_flow_hash);
+        if (entry) {
+            xqc_path_ctx_t *path = wlb_find_path_ctx(conn, entry->path_id);
+            if (path && xqc_scheduler_check_path_can_send(path, packet_out, check_cwnd)) {
+                entry->last_ts = now_us;
+                return path;
+            }
+            /* Sticky path unavailable — will reassign below */
         }
-        /* Sticky path unavailable — will reassign below */
     }
 
     /* Start new WRR round if current round is exhausted.
@@ -613,7 +621,9 @@ xqc_wlb_scheduler_get_path(void *scheduler,
     if (s->n_paths == 1) {
         xqc_path_ctx_t *path = wlb_find_path_ctx(conn, s->paths[0].path_id);
         if (path && xqc_scheduler_check_path_can_send(path, packet_out, check_cwnd)) {
-            wlb_flow_insert(s, packet_out->po_flow_hash, path->path_id, now_us);
+            if (pin_flow) {
+                wlb_flow_insert(s, packet_out->po_flow_hash, path->path_id, now_us);
+            }
             return path;
         }
         if (cc_blocked) {
@@ -622,14 +632,16 @@ xqc_wlb_scheduler_get_path(void *scheduler,
         return NULL;
     }
 
-    /* WRR assignment — pin this flow to the selected path */
+    /* WRR assignment — pin flow to selected path only for TCP */
     uint64_t sel_path_id = wlb_wrr_select(s, conn, packet_out, check_cwnd);
     if (sel_path_id != UINT64_MAX) {
-        wlb_flow_insert(s, packet_out->po_flow_hash, sel_path_id, now_us);
+        if (pin_flow) {
+            wlb_flow_insert(s, packet_out->po_flow_hash, sel_path_id, now_us);
+        }
         xqc_path_ctx_t *path = wlb_find_path_ctx(conn, sel_path_id);
         xqc_log(conn->log, XQC_LOG_DEBUG,
-                 "|wlb|select|path_id:%ui|n_paths:%d|",
-                 sel_path_id, s->n_paths);
+                 "|wlb|select|path_id:%ui|n_paths:%d|pinned:%d|",
+                 sel_path_id, s->n_paths, (int)pin_flow);
         return path;
     }
 
