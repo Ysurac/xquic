@@ -1,16 +1,10 @@
 /**
  * @copyright Copyright (c) 2026, mp0rta
  *
- * WLB (Weighted Load Balancing) scheduler — flow-affinity multipath scheduler.
+ * WLB (Weighted Load Balancing) multipath scheduler for QUIC Datagrams.
  *
- * Based on OLB (Optimal Load Balancing, Computer Communications 2017) for WRR
- * deficit-counter mechanism, and LATE (Loss-Aware Throughput Estimation,
- * IEEE TWC 2021) for the weight calculation formula.
- *
- * Key difference from MinRTT: packets belonging to the same inner flow
- * (identified by po_flow_hash) are pinned to the same QUIC path.  This
- * prevents TCP reordering inside VPN tunnels while still aggregating
- * bandwidth across paths via weighted round-robin of flows.
+ * Flow-affinity WRR with LATE-based weight estimation.
+ * Inner flows are pinned to paths via hash table to prevent TCP reordering.
  */
 
 #ifndef _XQC_SCHEDULER_WLB_H_INCLUDED_
