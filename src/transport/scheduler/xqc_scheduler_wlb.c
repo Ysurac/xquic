@@ -61,6 +61,8 @@
 #define WLB_FLOW_EXPIRE_US    (60ULL * 1000000)  /* 60 s idle expiry */
 #define WLB_LOSS_EVICT_THRESH 0.02  /* evict flows from paths with loss >= 2% (BBR2+ aligned) */
 #define WLB_PTO_EVICT_THRESH  3    /* evict flows from paths with >= 3 consecutive PTOs (~500ms) */
+#define WLB_RECOVERY_UNPIN_GRACE_US (1000ULL * 1000) /* 1s temporary unpin after path recovery */
+#define WLB_NO_PATH_ID UINT64_MAX
 
 /*
  * Tombstone marker for deleted flow table entries.
@@ -95,6 +97,12 @@ typedef struct {
     int                  n_paths;
     wlb_flow_entry_t     flows[WLB_FLOW_TABLE_SIZE];
     uint64_t             last_expire_ts;  /* throttle expire scans to 1/sec */
+    int                  last_healthy_paths; /* for recovery-triggered rebalance */
+    uint64_t             last_healthy_path_ids[WLB_MAX_PATHS];
+    int                  last_healthy_path_ids_n;
+    int                  force_refresh_paths; /* refresh WRR cache on recovery */
+    uint64_t             recovery_unpin_until_us; /* temporarily disable TCP pinning after recovery */
+    uint64_t             recovery_prefer_path_id; /* newly recovered path to prefer for first re-pin */
     xqc_log_t           *log;
 } xqc_wlb_scheduler_t;
 
@@ -178,9 +186,99 @@ wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
     }
     s->last_expire_ts = now_us;
 
+    /*
+     * Detect path recovery/addition (e.g. failover path comes back) without
+     * mutating scheduler WRR state here.  Updating s->paths inside expire()
+     * caused regressions in failover behavior because expire() runs on the
+     * pinned-flow fast path.
+     */
+    int active_healthy_paths = 0;
+    uint64_t active_healthy_ids[WLB_MAX_PATHS];
+    int active_healthy_ids_n = 0;
+    uint64_t newly_seen_path_id = WLB_NO_PATH_ID;
+    xqc_list_head_t *pos, *next;
+    xqc_path_ctx_t *scan_path;
+    xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
+        scan_path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
+        if (scan_path->path_state != XQC_PATH_STATE_ACTIVE
+            || scan_path->app_path_status == XQC_APP_PATH_STATUS_FROZEN
+            || (scan_path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR))
+        {
+            continue;
+        }
+        /* Blackholed paths can stay ACTIVE without socket error. Treat a path
+         * with repeated PTOs as unhealthy for recovery-detection purposes. */
+        if (scan_path->path_send_ctl
+            && scan_path->path_send_ctl->ctl_pto_count >= WLB_PTO_EVICT_THRESH)
+        {
+            continue;
+        }
+        active_healthy_paths++;
+        if (active_healthy_ids_n < WLB_MAX_PATHS) {
+            active_healthy_ids[active_healthy_ids_n++] = scan_path->path_id;
+        }
+    }
+    /* Detect any newly appeared healthy path_id first so recovery-prefer can
+     * target a concrete path even when count-based detection also fires. */
+    if (s->last_healthy_path_ids_n > 0) {
+        for (int i = 0; i < active_healthy_ids_n; i++) {
+            xqc_bool_t seen = XQC_FALSE;
+            for (int j = 0; j < s->last_healthy_path_ids_n; j++) {
+                if (active_healthy_ids[i] == s->last_healthy_path_ids[j]) {
+                    seen = XQC_TRUE;
+                    break;
+                }
+            }
+            if (!seen) {
+                newly_seen_path_id = active_healthy_ids[i];
+                break; /* one path is enough as recovery hint */
+            }
+        }
+    }
+
+    xqc_bool_t has_new_path = XQC_FALSE;
+    if (s->last_healthy_paths > 0 && active_healthy_paths > s->last_healthy_paths) {
+        has_new_path = XQC_TRUE; /* recovery/addition relative to previous sweep */
+    }
+    if (!has_new_path && newly_seen_path_id != WLB_NO_PATH_ID) {
+        has_new_path = XQC_TRUE; /* path-id replacement with constant count */
+    }
+
+    if (has_new_path) {
+        s->force_refresh_paths = 1;
+        s->recovery_unpin_until_us = now_us + WLB_RECOVERY_UNPIN_GRACE_US;
+    }
+
+    if (has_new_path) {
+        if (newly_seen_path_id != WLB_NO_PATH_ID) {
+            s->recovery_prefer_path_id = newly_seen_path_id;
+            xqc_log(conn->log, XQC_LOG_INFO,
+                    "|wlb|recovery_detected|new_path_id:%ui|healthy_prev:%d|healthy_now:%d|",
+                    (unsigned)newly_seen_path_id, s->last_healthy_paths, active_healthy_paths);
+        } else {
+            s->recovery_prefer_path_id = WLB_NO_PATH_ID;
+            xqc_log(conn->log, XQC_LOG_INFO,
+                    "|wlb|recovery_detected|healthy_prev:%d|healthy_now:%d|",
+                    s->last_healthy_paths, active_healthy_paths);
+        }
+    }
+
+    s->last_healthy_paths = active_healthy_paths;
+    s->last_healthy_path_ids_n = active_healthy_ids_n;
+    for (int i = 0; i < active_healthy_ids_n; i++) {
+        s->last_healthy_path_ids[i] = active_healthy_ids[i];
+    }
+
     for (int i = 0; i < WLB_FLOW_TABLE_SIZE; i++) {
         wlb_flow_entry_t *e = &s->flows[i];
         if (e->hash == 0 || e->hash == WLB_FLOW_TOMBSTONE) {
+            continue;
+        }
+
+        if (has_new_path) {
+            /* Re-pin active flows after path recovery so throughput can climb
+             * back to the restored path capacity without waiting for idle/loss. */
+            e->hash = WLB_FLOW_TOMBSTONE;
             continue;
         }
 
@@ -208,7 +306,12 @@ wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
 
 /* ---------- path helpers ---------- */
 
-/** Find an active, non-frozen, non-errored path context by path_id. */
+/** Find a schedulable path context by path_id.
+ *
+ * Treat repeated-PTO paths as temporarily unavailable for app-data scheduling.
+ * A blackholed path can remain ACTIVE without socket error, which otherwise
+ * causes WLB to keep selecting it and stall throughput after link-down.
+ */
 static xqc_path_ctx_t *
 wlb_find_path_ctx(xqc_connection_t *conn, uint64_t path_id)
 {
@@ -219,7 +322,9 @@ wlb_find_path_ctx(xqc_connection_t *conn, uint64_t path_id)
         if (path->path_id == path_id
             && path->path_state == XQC_PATH_STATE_ACTIVE
             && path->app_path_status != XQC_APP_PATH_STATUS_FROZEN
-            && !(path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR))
+            && !(path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR)
+            && !(path->path_send_ctl
+                 && path->path_send_ctl->ctl_pto_count >= WLB_PTO_EVICT_THRESH))
         {
             return path;
         }
@@ -581,7 +686,17 @@ wlb_minrtt_fallback(xqc_connection_t *conn, xqc_packet_out_t *packet_out,
 
         if (path->path_state != XQC_PATH_STATE_ACTIVE
             || path->app_path_status == XQC_APP_PATH_STATUS_FROZEN
+            || (path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR)
             || (reinject && (packet_out->po_path_id == path->path_id)))
+        {
+            continue;
+        }
+
+        /* Keep control/ACK traffic off blackholed paths as well.  WLB routes
+         * po_flow_hash==0 packets via this MinRTT fallback, so omitting the
+         * PTO guard can stall failover even if app datagrams are re-pinned. */
+        if (path->path_send_ctl
+            && path->path_send_ctl->ctl_pto_count >= WLB_PTO_EVICT_THRESH)
         {
             continue;
         }
@@ -626,6 +741,7 @@ xqc_wlb_scheduler_init(void *scheduler, xqc_log_t *log, xqc_scheduler_params_t *
     xqc_wlb_scheduler_t *s = (xqc_wlb_scheduler_t *)scheduler;
     memset(s, 0, sizeof(*s));
     s->log = log;
+    s->recovery_prefer_path_id = WLB_NO_PATH_ID;
 }
 
 /* Sentinel: per-packet WRR without flow pinning (UDP/QUIC datagrams) */
@@ -659,8 +775,22 @@ xqc_wlb_scheduler_get_path(void *scheduler,
 
     uint64_t now_us = xqc_monotonic_timestamp();
 
-    /* Flow table lookup — reuse existing flow→path pinning (TCP only) */
-    if (pin_flow) {
+    /* After path recovery, allow a brief per-packet WRR phase so existing TCP
+     * flows don't immediately re-pin to the surviving path before the restored
+     * path accumulates sendability/weight signal. */
+    xqc_bool_t in_recovery_grace =
+        (pin_flow && s->recovery_unpin_until_us != 0 && now_us < s->recovery_unpin_until_us);
+    if (in_recovery_grace) {
+        xqc_log(conn->log, XQC_LOG_INFO,
+                "|wlb|recovery_grace|flow:%ui|remain_ms:%ui|",
+                packet_out->po_flow_hash,
+                (unsigned)((s->recovery_unpin_until_us - now_us) / 1000));
+    }
+
+    /* Flow table lookup — reuse existing flow→path pinning (TCP only).
+     * During recovery grace, skip flow-hit fast path so the flow can be
+     * re-evaluated (and potentially steered to the recovered path). */
+    if (pin_flow && !in_recovery_grace) {
         wlb_flow_expire(s, now_us, conn);
 
         wlb_flow_entry_t *entry = wlb_flow_lookup(s, packet_out->po_flow_hash);
@@ -675,12 +805,19 @@ xqc_wlb_scheduler_get_path(void *scheduler,
             if (path
                 && path->path_send_ctl->ctl_pto_count >= WLB_PTO_EVICT_THRESH)
             {
+                xqc_log(conn->log, XQC_LOG_INFO,
+                        "|wlb|flow_evict|reason:pto|flow:%ui|path:%ui|pto:%ud|",
+                        packet_out->po_flow_hash, path->path_id,
+                        path->path_send_ctl->ctl_pto_count);
                 entry->hash = WLB_FLOW_TOMBSTONE;
                 path = NULL;
             }
 
             if (path && xqc_scheduler_check_path_can_send(path, packet_out, check_cwnd)) {
                 entry->last_ts = now_us;
+                xqc_log(conn->log, XQC_LOG_INFO,
+                        "|wlb|flow_hit|flow:%ui|path:%ui|",
+                        packet_out->po_flow_hash, path->path_id);
                 return path;
             }
             if (path) {
@@ -691,13 +828,45 @@ xqc_wlb_scheduler_get_path(void *scheduler,
                 pin_flow = XQC_FALSE;
             }
         }
+    } else if (pin_flow) {
+        /* Still run maintenance during recovery grace even though we bypass
+         * the pinned-flow fast path. */
+        wlb_flow_expire(s, now_us, conn);
+    }
+
+    /* Recovery hint: when a path has just returned, prefer it for the first
+     * re-pin of a flow that currently has no usable pin. This helps the heavy
+     * surviving-path flow migrate back instead of immediately re-pinning to the
+     * already-hot path. */
+    if (pin_flow && in_recovery_grace && s->recovery_prefer_path_id != WLB_NO_PATH_ID) {
+        xqc_path_ctx_t *rpath = wlb_find_path_ctx(conn, s->recovery_prefer_path_id);
+        if (rpath && xqc_scheduler_check_path_can_send(rpath, packet_out, check_cwnd)) {
+            wlb_flow_insert(s, packet_out->po_flow_hash, rpath->path_id, now_us);
+            xqc_log(conn->log, XQC_LOG_INFO,
+                    "|wlb|recovery_prefer|flow:%ui|path:%ui|",
+                    packet_out->po_flow_hash, rpath->path_id);
+            return rpath;
+        }
     }
 
     /* Start new WRR round if current round is exhausted.
      * Recompute LATE weights from real-time metrics at round boundary. */
-    if (wlb_needs_new_round(s)) {
+    if (s->force_refresh_paths || wlb_needs_new_round(s)) {
+        if (s->force_refresh_paths) {
+            xqc_log(conn->log, XQC_LOG_INFO,
+                    "|wlb|refresh|reason:recovery|old_n_paths:%d|",
+                    s->n_paths);
+        }
         wlb_refresh_paths(s, conn);
         wlb_start_round(s);
+        xqc_log(conn->log, XQC_LOG_INFO,
+                "|wlb|round_start|n_paths:%d|p0:%ui|d0:%lld|p1:%ui|d1:%lld|",
+                s->n_paths,
+                (unsigned)(s->n_paths > 0 ? s->paths[0].path_id : UINT32_MAX),
+                (long long)(s->n_paths > 0 ? s->paths[0].deficit : -1),
+                (unsigned)(s->n_paths > 1 ? s->paths[1].path_id : UINT32_MAX),
+                (long long)(s->n_paths > 1 ? s->paths[1].deficit : -1));
+        s->force_refresh_paths = 0;
     }
 
     if (s->n_paths == 0) {
@@ -735,9 +904,12 @@ xqc_wlb_scheduler_get_path(void *scheduler,
     if (sel_path_id != UINT64_MAX) {
         if (pin_flow) {
             wlb_flow_insert(s, packet_out->po_flow_hash, sel_path_id, now_us);
+            xqc_log(conn->log, XQC_LOG_INFO,
+                    "|wlb|flow_pin|flow:%ui|path:%ui|",
+                    packet_out->po_flow_hash, sel_path_id);
         }
         xqc_path_ctx_t *path = wlb_find_path_ctx(conn, sel_path_id);
-        xqc_log(conn->log, XQC_LOG_DEBUG,
+        xqc_log(conn->log, XQC_LOG_INFO,
                  "|wlb|select|path_id:%ui|n_paths:%d|pinned:%d|",
                  sel_path_id, s->n_paths, (int)pin_flow);
         return path;
