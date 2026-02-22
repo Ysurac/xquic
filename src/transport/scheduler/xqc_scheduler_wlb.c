@@ -16,6 +16,28 @@
  *   3. Pin inner flows to paths via hash table to prevent TCP reordering.
  *   4. If no path can send (all cwnd-blocked), fall back to MinRTT.
  *
+ * Soft pinning (cwnd-blocked spillover):
+ *   When a flow's pinned path is temporarily cwnd-blocked, the packet is
+ *   sent on another path via WRR WITHOUT updating the flow table.  The
+ *   flow remains pinned to the original path and returns to it once cwnd
+ *   headroom is available.
+ *
+ *   This "soft pin" trades occasional TCP reordering (caused by RTT
+ *   disparity between the pinned path and the spillover path) for two
+ *   critical benefits:
+ *     - Avoids flow oscillation: strict re-pinning caused flows to get
+ *       stuck on a slower path after transient cwnd saturation on the
+ *       fast path, degrading throughput by ~20% with few TCP streams.
+ *     - Preserves loss resilience: unlike the alternative of blocking
+ *       sends until the pinned path's cwnd opens, soft pin keeps packets
+ *       flowing during loss events where a path may be blocked for
+ *       extended periods.
+ *
+ *   Measured impact: ~4% throughput overhead with 1 TCP stream over
+ *   asymmetric paths (300Mbit/10ms + 80Mbit/30ms) vs single-path.
+ *   With 8+ streams the overhead disappears and aggregation gains
+ *   dominate (+15-23%).
+ *
  * References:
  *   - OLB: "Optimal Load Balancing", Computer Communications, 2017
  *   - LATE: "Loss-Aware Throughput Estimation", IEEE TWC, 2021
