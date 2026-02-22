@@ -644,7 +644,13 @@ xqc_wlb_scheduler_get_path(void *scheduler,
                 entry->last_ts = now_us;
                 return path;
             }
-            /* Sticky path unavailable — will reassign below */
+            if (path) {
+                /* Pinned path exists but cwnd-blocked — use another path
+                 * temporarily WITHOUT re-pinning.  This prevents oscillation
+                 * where a flow bounces between a fast and slow path whenever
+                 * the fast path's cwnd is momentarily full. */
+                pin_flow = XQC_FALSE;
+            }
         }
     }
 
