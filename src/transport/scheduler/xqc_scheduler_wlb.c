@@ -60,6 +60,7 @@
 #define WLB_MAX_PROBE         16      /* linear probe limit */
 #define WLB_FLOW_EXPIRE_US    (60ULL * 1000000)  /* 60 s idle expiry */
 #define WLB_LOSS_EVICT_THRESH 0.02  /* evict flows from paths with loss >= 2% (BBR2+ aligned) */
+#define WLB_PTO_EVICT_THRESH  3    /* evict flows from paths with >= 3 consecutive PTOs (~500ms) */
 
 /*
  * Tombstone marker for deleted flow table entries.
@@ -207,7 +208,7 @@ wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
 
 /* ---------- path helpers ---------- */
 
-/** Find an active, non-frozen path context by path_id. */
+/** Find an active, non-frozen, non-errored path context by path_id. */
 static xqc_path_ctx_t *
 wlb_find_path_ctx(xqc_connection_t *conn, uint64_t path_id)
 {
@@ -217,7 +218,8 @@ wlb_find_path_ctx(xqc_connection_t *conn, uint64_t path_id)
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
         if (path->path_id == path_id
             && path->path_state == XQC_PATH_STATE_ACTIVE
-            && path->app_path_status != XQC_APP_PATH_STATUS_FROZEN)
+            && path->app_path_status != XQC_APP_PATH_STATUS_FROZEN
+            && !(path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR))
         {
             return path;
         }
@@ -429,12 +431,13 @@ wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
     int old_n = s->n_paths;
     memcpy(old, s->paths, sizeof(wlb_path_weight_t) * old_n);
 
-    /* First pass: find max SRTT across active paths */
+    /* First pass: find max SRTT across active, healthy paths */
     uint64_t max_rtt_us = 0;
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
         if (path->path_state != XQC_PATH_STATE_ACTIVE
-            || path->app_path_status == XQC_APP_PATH_STATUS_FROZEN)
+            || path->app_path_status == XQC_APP_PATH_STATUS_FROZEN
+            || (path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR))
         {
             continue;
         }
@@ -452,7 +455,8 @@ wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
         if (path->path_state != XQC_PATH_STATE_ACTIVE
-            || path->app_path_status == XQC_APP_PATH_STATUS_FROZEN)
+            || path->app_path_status == XQC_APP_PATH_STATUS_FROZEN
+            || (path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR))
         {
             continue;
         }
@@ -662,6 +666,19 @@ xqc_wlb_scheduler_get_path(void *scheduler,
         wlb_flow_entry_t *entry = wlb_flow_lookup(s, packet_out->po_flow_hash);
         if (entry) {
             xqc_path_ctx_t *path = wlb_find_path_ctx(conn, entry->path_id);
+
+            /* PTO-based eviction: if the pinned path has been unresponsive
+             * for several consecutive PTOs, the path is likely dead (e.g.
+             * link down where sendto still succeeds but packets are silently
+             * dropped).  Evict the flow so it gets re-pinned to a live path
+             * via WRR below. */
+            if (path
+                && path->path_send_ctl->ctl_pto_count >= WLB_PTO_EVICT_THRESH)
+            {
+                entry->hash = WLB_FLOW_TOMBSTONE;
+                path = NULL;
+            }
+
             if (path && xqc_scheduler_check_path_can_send(path, packet_out, check_cwnd)) {
                 entry->last_ts = now_us;
                 return path;
