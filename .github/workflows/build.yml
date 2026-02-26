@@ -1,8 +1,9 @@
 name: Build
 
 on:
+  workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ main, feature/masque ]
   pull_request:
     branches: [ main ]
 
@@ -28,7 +29,7 @@ jobs:
     - name: Linux Setup
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential libevent-dev
+        sudo apt-get install -y build-essential libevent-dev clang
 
     - name: Cunit Setup
       run: |
@@ -39,6 +40,10 @@ jobs:
         sudo apt-get install -y python3-pip
         sudo apt-get install -y python3-lxml
         sudo pip3 install gcovr
+
+    - name: Fuzz MASQUE smoke (libFuzzer)
+      run: |
+        XQC_FUZZ_C_COMPILER=clang XQC_FUZZ_MAX_TOTAL_TIME=60 tests/fuzz/run_smoke.sh
 
     - name: Update Submodule
       run: |
@@ -146,5 +151,3 @@ jobs:
         cd build
         cmake -DPLATFORM=mac -DSSL_TYPE=${SSL_TYPE_STR} -DSSL_PATH=${SSL_PATH_STR} -DSSL_INC_PATH=${SSL_INC_PATH_STR} -DSSL_LIB_PATH=${SSL_LIB_PATH_STR} ..
         make -j
-
-
