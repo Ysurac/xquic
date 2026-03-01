@@ -422,8 +422,10 @@ else()
         "-ldl -Wl,--whole-archive -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/scripts/xquic.lds"
         ${SSL_LIB_PATH}
         "-Wl,--no-whole-archive"
-        -lpthread
     )
+    if(NOT ANDROID)
+        target_link_libraries(xquic -lpthread)
+    endif()
 endif()
 
 

@@ -13,6 +13,7 @@ XQUIC_VERS_1.0 {
         xqc_h3_conn_get_ssl;
         xqc_h3_conn_set_user_data;
         xqc_h3_conn_get_user_data;
+        xqc_h3_conn_get_xqc_conn;
         xqc_h3_conn_get_peer_addr;
         xqc_h3_conn_get_local_addr;
         xqc_h3_conn_is_ready_to_send_early_data;
@@ -45,6 +46,7 @@ XQUIC_VERS_1.0 {
         xqc_conn_get_peer_addr;
         xqc_conn_get_local_addr;
         xqc_stream_create;
+        xqc_stream_create_with_direction;
         xqc_stream_set_user_data;
         xqc_get_conn_user_data_by_stream;
         xqc_stream_id;
@@ -57,6 +59,8 @@ XQUIC_VERS_1.0 {
         xqc_engine_recv_batch;
         xqc_engine_main_logic;
         xqc_engine_get_default_config;
+        xqc_engine_set_log_level;
+        xqc_engine_get_conn_by_scid;
         xqc_packet_parse_cid;
         xqc_cid_is_equal;
         xqc_dcid_str;
@@ -129,6 +133,20 @@ XQUIC_VERS_1.0 {
         xqc_xor_code_cb;
         xqc_packet_mask_code_cb;
         xqc_conn_set_init_idle_timeout;
+        xqc_wlb_scheduler_cb;
+        xqc_conn_set_dgram_flow_hash;
+        xqc_h3_ext_masque_frame_udp;
+        xqc_h3_ext_masque_unframe_udp;
+        xqc_h3_ext_masque_udp_mss;
+        xqc_h3_ext_capsule_decode;
+        xqc_h3_ext_connectip_parse_address_assign;
+        xqc_h3_ext_connectip_build_address_request;
+        xqc_h3_ext_connectip_parse_route_advertisement;
+        xqc_h3_ext_connectip_validate_route_advertisement;
+        xqc_h3_ext_connectip_build_address_assign;
+        xqc_h3_ext_connectip_build_route_advertisement;
+        xqc_h3_ext_capsule_encode;
+        xqc_conn_get_path_srtt;
     local:
         *;
 };
