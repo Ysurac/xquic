@@ -1069,6 +1069,7 @@ XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_backup_sched
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_backup_fec_scheduler_cb;
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_rap_scheduler_cb;
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_wlb_scheduler_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_wrtt_scheduler_cb;
 #ifdef XQC_ENABLE_MP_INTEROP
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_interop_scheduler_cb;
 #endif
@@ -2291,6 +2292,14 @@ xqc_int_t xqc_conn_mark_path_available(xqc_engine_t *engine, const xqc_cid_t *ci
 XQC_EXPORT_PUBLIC_API
 xqc_int_t xqc_conn_mark_path_frozen(xqc_engine_t *engine, const xqc_cid_t *cid, uint64_t path_id);
 
+/**
+ * Set the static scheduler weight for a path (WRTT scheduler).
+ * Higher weight = higher priority; equal-weight paths are broken by RTT.
+ * weight=0 is treated as 1. Analogous to 'ip route nexthop weight N'.
+ */
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_conn_set_path_weight(xqc_engine_t *engine, const xqc_cid_t *cid,
+    uint64_t path_id, uint32_t weight);
 
 /**
  * Calculate how many available paths on the current connection, i.e., paths which finished validation and is marked "available" status.

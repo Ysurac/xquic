@@ -1713,6 +1713,32 @@ xqc_conn_mark_path_frozen(xqc_engine_t *engine, const xqc_cid_t *cid, uint64_t p
 
 
 xqc_int_t
+xqc_conn_set_path_weight(xqc_engine_t *engine, const xqc_cid_t *cid,
+    uint64_t path_id, uint32_t weight)
+{
+    xqc_connection_t *conn = xqc_engine_conns_hash_find(engine, cid, 's');
+    if (!conn) {
+        xqc_log(engine->log, XQC_LOG_ERROR, "|can not find connection|");
+        return -XQC_ECONN_NFOUND;
+    }
+    if (conn->conn_state >= XQC_CONN_STATE_CLOSING) {
+        return -XQC_CLOSING;
+    }
+
+    xqc_path_ctx_t *path = xqc_conn_find_path_by_path_id(conn, path_id);
+    if (path == NULL) {
+        xqc_log(engine->log, XQC_LOG_WARN,
+                "|path not found|conn:%p|path_id:%ui|", conn, path_id);
+        return -XQC_EMP_PATH_NOT_FOUND;
+    }
+
+    path->path_weight = weight;
+    xqc_log(conn->log, XQC_LOG_DEBUG,
+            "|set_path_weight|path_id:%ui|weight:%ud|", path_id, weight);
+    return XQC_OK;
+}
+
+xqc_int_t
 xqc_conn_mark_path_available(xqc_engine_t *engine, const xqc_cid_t *cid, uint64_t path_id)
 {
     xqc_connection_t *conn = NULL;

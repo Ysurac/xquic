@@ -154,6 +154,10 @@ struct xqc_path_ctx_s {
     uint32_t            standby_probe_count;
     uint32_t            app_path_status_changed_count;
 
+    /* Static scheduler weight for WRTT. 0 treated as 1 (equal priority).
+     * Set via xqc_conn_set_path_weight(). Analogous to ip route nexthop weight N. */
+    uint32_t            path_weight;
+
     /* PTMUD */
     size_t              curr_pkt_out_size;
     size_t              path_max_pkt_out_size;
