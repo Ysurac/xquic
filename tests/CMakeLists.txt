@@ -124,10 +124,14 @@ if(HAVE_CUNIT)
         ${UNIT_TEST_DIR}/xqc_mp21_compliance_test.c
         ${UNIT_TEST_DIR}/xqc_test_helpers.c
         ${UNIT_TEST_DIR}/xqc_test_path_hard_cap.c
+        ${UNIT_TEST_DIR}/xqc_test_next_wakeup.c
         ${UNIT_TEST_DIR}/xqc_set_conn_settings_test.c
         ${UNIT_TEST_DIR}/xqc_crypto_frame_test.c
         ${UNIT_TEST_DIR}/xqc_dos_e2e_test.c
         ${UNIT_TEST_DIR}/xqc_wlb_test.c
+        ${UNIT_TEST_DIR}/xqc_send_ctl_test.c
+        ${UNIT_TEST_DIR}/xqc_vn_test.c
+        ${UNIT_TEST_DIR}/xqc_frame_type_bit_test.c
     )
 
     if(XQC_ENABLE_FEC)
