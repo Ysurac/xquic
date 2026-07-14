@@ -418,9 +418,9 @@ xqc_log_time(char *buf, size_t buf_len)
              tm.tm_mday, tm.tm_hour,
              tm.tm_min, tm.tm_sec, tv.tv_usec);
 #else
-    snprintf(buf, buf_len, "%4d/%02d/%02d %02d:%02d:%02d %06ld",
+    snprintf(buf, buf_len, "%4d/%02d/%02d %02d:%02d:%02d %06lld",
              tm.tm_year, tm.tm_mon,
              tm.tm_mday, tm.tm_hour,
-             tm.tm_min, tm.tm_sec, tv.tv_usec);
+             tm.tm_min, tm.tm_sec, (long long)tv.tv_usec);
 #endif
 }
