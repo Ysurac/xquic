@@ -242,6 +242,7 @@ set(
     "src/transport/scheduler/xqc_scheduler_rap.c"
     "src/transport/scheduler/xqc_scheduler_wlb.c"
     "src/transport/scheduler/xqc_scheduler_wrtt.c"
+    "src/transport/scheduler/xqc_scheduler_wrr.c"
 )
 
 if(XQC_ENABLE_MP_INTEROP)

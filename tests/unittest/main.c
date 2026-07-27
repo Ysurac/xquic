@@ -50,6 +50,7 @@
 #include "xqc_crypto_frame_test.h"
 #include "xqc_dos_e2e_test.h"
 #include "xqc_wlb_test.h"
+#include "xqc_wrr_test.h"
 #include "xqc_send_ctl_test.h"
 #include "xqc_vn_test.h"
 #include "xqc_frame_type_bit_test.h"
@@ -318,6 +319,13 @@ main()
         || !CU_add_test(pSuite, "xqc_test_wlb_sym_multiflow_distributes", xqc_test_wlb_sym_multiflow_distributes)
         || !CU_add_test(pSuite, "xqc_test_wlb_recovery_prefer_skips_initial_path_addition", xqc_test_wlb_recovery_prefer_skips_initial_path_addition)
         || !CU_add_test(pSuite, "xqc_test_wlb_recovery_prefer_fires_after_real_failover", xqc_test_wlb_recovery_prefer_fires_after_real_failover)
+        || !CU_add_test(pSuite, "xqc_test_wrr_equal_weights_alternate", xqc_test_wrr_equal_weights_alternate)
+        || !CU_add_test(pSuite, "xqc_test_wrr_weighted_ratio_3_1", xqc_test_wrr_weighted_ratio_3_1)
+        || !CU_add_test(pSuite, "xqc_test_wrr_blocked_path_still_accrues_and_catches_up", xqc_test_wrr_blocked_path_still_accrues_and_catches_up)
+        || !CU_add_test(pSuite, "xqc_test_wrr_control_packets_use_minrtt_and_dont_perturb_weight_state", xqc_test_wrr_control_packets_use_minrtt_and_dont_perturb_weight_state)
+        || !CU_add_test(pSuite, "xqc_test_wrr_all_paths_cwnd_blocked_returns_null_and_cc_blocked", xqc_test_wrr_all_paths_cwnd_blocked_returns_null_and_cc_blocked)
+        || !CU_add_test(pSuite, "xqc_test_wrr_weight_zero_treated_as_one", xqc_test_wrr_weight_zero_treated_as_one)
+        || !CU_add_test(pSuite, "xqc_test_wrr_path_removed_no_crash", xqc_test_wrr_path_removed_no_crash)
         /* ADD TESTS HERE */)
     {
         CU_cleanup_registry();
