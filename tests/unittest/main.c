@@ -51,6 +51,7 @@
 #include "xqc_dos_e2e_test.h"
 #include "xqc_wlb_test.h"
 #include "xqc_wrr_test.h"
+#include "xqc_redundant_test.h"
 #include "xqc_send_ctl_test.h"
 #include "xqc_vn_test.h"
 #include "xqc_frame_type_bit_test.h"
@@ -326,6 +327,13 @@ main()
         || !CU_add_test(pSuite, "xqc_test_wrr_all_paths_cwnd_blocked_returns_null_and_cc_blocked", xqc_test_wrr_all_paths_cwnd_blocked_returns_null_and_cc_blocked)
         || !CU_add_test(pSuite, "xqc_test_wrr_weight_zero_treated_as_one", xqc_test_wrr_weight_zero_treated_as_one)
         || !CU_add_test(pSuite, "xqc_test_wrr_path_removed_no_crash", xqc_test_wrr_path_removed_no_crash)
+        || !CU_add_test(pSuite, "xqc_test_redundant_two_paths_primary_and_replica", xqc_test_redundant_two_paths_primary_and_replica)
+        || !CU_add_test(pSuite, "xqc_test_redundant_three_paths_replicate_to_all_others", xqc_test_redundant_three_paths_replicate_to_all_others)
+        || !CU_add_test(pSuite, "xqc_test_redundant_cwnd_blocked_path_gets_no_replica", xqc_test_redundant_cwnd_blocked_path_gets_no_replica)
+        || !CU_add_test(pSuite, "xqc_test_redundant_frozen_path_excluded", xqc_test_redundant_frozen_path_excluded)
+        || !CU_add_test(pSuite, "xqc_test_redundant_reinject_call_returns_single_path_no_replica", xqc_test_redundant_reinject_call_returns_single_path_no_replica)
+        || !CU_add_test(pSuite, "xqc_test_redundant_all_paths_cwnd_blocked_returns_null_and_cc_blocked", xqc_test_redundant_all_paths_cwnd_blocked_returns_null_and_cc_blocked)
+        || !CU_add_test(pSuite, "xqc_test_redundant_single_path_no_replica_no_crash", xqc_test_redundant_single_path_no_replica_no_crash)
         /* ADD TESTS HERE */)
     {
         CU_cleanup_registry();

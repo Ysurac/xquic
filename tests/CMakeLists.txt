@@ -130,6 +130,7 @@ if(HAVE_CUNIT)
         ${UNIT_TEST_DIR}/xqc_dos_e2e_test.c
         ${UNIT_TEST_DIR}/xqc_wlb_test.c
         ${UNIT_TEST_DIR}/xqc_wrr_test.c
+        ${UNIT_TEST_DIR}/xqc_redundant_test.c
         ${UNIT_TEST_DIR}/xqc_send_ctl_test.c
         ${UNIT_TEST_DIR}/xqc_vn_test.c
         ${UNIT_TEST_DIR}/xqc_frame_type_bit_test.c

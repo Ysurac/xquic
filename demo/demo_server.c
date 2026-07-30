@@ -1231,7 +1231,7 @@ xqc_demo_svr_usage(int argc, char *argv[])
             "   -i    use interop mode\n"
             "   -M    enable MPQUIC.\n"
             "   -P    enable MPQUIC to return ACK_MPs on any paths.\n"
-            "   -s    multipath scheduler (interop, minrtt, backup), default: interop\n"
+            "   -s    multipath scheduler (interop, minrtt, backup, redundant), default: interop\n"
             "   -R    Reinjection (1,2,4) \n"
             "   -u    Keyupdate packet threshold\n"
             "   -F    MTU size (default: 1200)\n"
@@ -1509,8 +1509,11 @@ xqc_demo_svr_init_conn_settings(xqc_engine_t *engine, xqc_demo_svr_args_t *args)
     if (strncmp(args->quic_cfg.mp_sched, "minrtt", strlen("minrtt")) == 0) {
         sched = xqc_minrtt_scheduler_cb;
 
-    } if (strncmp(args->quic_cfg.mp_sched, "backup", strlen("backup")) == 0) {
+    } else if (strncmp(args->quic_cfg.mp_sched, "backup", strlen("backup")) == 0) {
         sched = xqc_backup_scheduler_cb;
+
+    } else if (strncmp(args->quic_cfg.mp_sched, "redundant", strlen("redundant")) == 0) {
+        sched = xqc_redundant_scheduler_cb;
 
     } else {
 #ifdef XQC_ENABLE_MP_INTEROP
