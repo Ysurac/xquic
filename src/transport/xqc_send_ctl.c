@@ -539,11 +539,56 @@ xqc_send_packet_check_cc(xqc_send_ctl_t *send_ctl,
 }
 
 
+/* xqc_list_for_each_safe() over sndq_unacked_packets[pns] caches `next`
+ * before running its loop body. xqc_send_queue_maybe_remove_unacked() can,
+ * as a side effect of processing a DIFFERENT packet_out than the one
+ * passed in (a redundant-scheduler replica whose ack resolves its
+ * origin's po_origin_ref_cnt to zero), splice that origin out of this
+ * same list and into sndq_free_packets. If the origin happened to be the
+ * caller's already-cached `next`, the loop's next iteration silently
+ * starts walking sndq_free_packets's own valid chain instead — while
+ * still comparing against sndq_unacked_packets[pns]'s sentinel, which it
+ * will never reach: an infinite loop over an otherwise perfectly healthy
+ * list. Call this right after any xqc_send_queue_maybe_remove_unacked()
+ * (or xqc_send_ctl_indirectly_ack_or_drop_po()) call inside such a loop
+ * to detect and recover: every entry that gets revisited as a result is a
+ * safe no-op (guarded by po_acked / the already-removed check above), so
+ * this bounds the loop by list size instead of leaving it unbounded. */
+void
+xqc_send_ctl_recover_stale_next(xqc_list_head_t **next, xqc_list_head_t *list_head)
+{
+    if (*next == list_head) {
+        return; /* legitimate end-of-list sentinel, not a packet_out */
+    }
+    xqc_packet_out_t *next_po = xqc_list_entry(*next, xqc_packet_out_t, po_list);
+    if (!(next_po->po_flag & XQC_POF_IN_UNACK_LIST)) {
+        *next = list_head->next;
+    }
+}
+
 void
 xqc_send_queue_maybe_remove_unacked(xqc_packet_out_t *packet_out, xqc_send_queue_t *send_queue, xqc_path_ctx_t *path)
 {
     /* it is origin & some pkt ref to this packet */
     if (packet_out->po_origin == NULL && packet_out->po_origin_ref_cnt != 0) {
+        return;
+    }
+
+    /* Already removed+freed by an earlier call. A redundant-scheduler
+     * replica can reach here twice: once via
+     * xqc_send_ctl_indirectly_ack_or_drop_po() when its origin gets acked
+     * on another path (treating this still-pending replica as indirectly
+     * acked), and again later via the normal ack-processing loop when the
+     * replica's own copy is genuinely acked by the peer. Neither list-
+     * membership flag is set once the first call has already run this
+     * function to completion, so a second call must be a no-op: acting on
+     * it again would decrement po_origin_ref_cnt an extra time and insert
+     * this packet_out into sndq_free_packets a second time while it is
+     * still linked in from the first insertion, corrupting the free list
+     * into a cycle (observed as a livelock: the corrupted list makes
+     * xqc_list_for_each_safe() elsewhere spin over the same few nodes
+     * forever). */
+    if (!(packet_out->po_flag & (XQC_POF_IN_UNACK_LIST | XQC_POF_IN_PATH_BUF_LIST))) {
         return;
     }
 
@@ -920,6 +965,22 @@ xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc
         if (packet_out->po_pkt.pkt_num >= range->low) {
             // this packet is acked
 
+            /* Already fully processed as acked on a prior pass (e.g. an
+             * origin packet whose replica(s) haven't been acked yet, so
+             * xqc_send_queue_maybe_remove_unacked() left it in this list
+             * on purpose — see its po_origin_ref_cnt guard). Re-running
+             * sample/RTT/CC/notify side effects for the same packet on
+             * every subsequent ack that happens to re-cover its range
+             * would corrupt congestion-control state and, since cumulative
+             * ACKs naturally re-cover old ranges, could reprocess it
+             * without bound. Just retry the (idempotent) removal, which
+             * succeeds once the reference count actually reaches zero. */
+            if (packet_out->po_acked) {
+                xqc_send_queue_maybe_remove_unacked(packet_out, send_queue, NULL);
+                xqc_send_ctl_recover_stale_next(&next, &send_queue->sndq_unacked_packets[pns]);
+                continue;
+            }
+
             // 修改标志位
             if (has_acked == 0) {
                 /* 初始化 */
@@ -987,6 +1048,7 @@ xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc
             
 
             xqc_send_queue_maybe_remove_unacked(packet_out, send_queue, NULL);
+            xqc_send_ctl_recover_stale_next(&next, &send_queue->sndq_unacked_packets[pns]);
 
             xqc_log(conn->log, XQC_LOG_DEBUG, "|sndq_packets_used:%ud||sndq_packets_used_bytes:%ud|sndq_packets_free:%ud|",
                     send_queue->sndq_packets_used, send_queue->sndq_packets_used_bytes, send_queue->sndq_packets_free);
@@ -1406,6 +1468,7 @@ xqc_send_ctl_detect_lost(xqc_send_ctl_t *send_ctl, xqc_send_queue_t *send_queue,
         repair_dgram = 0;
 
         if (xqc_send_ctl_indirectly_ack_or_drop_po(conn, po)) {
+            xqc_send_ctl_recover_stale_next(&next, &send_queue->sndq_unacked_packets[pns]);
             continue;
         }
 

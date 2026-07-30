@@ -399,6 +399,7 @@ xqc_path_move_unack_packets_from_conn(xqc_path_ctx_t *path, xqc_connection_t *co
         repair_dgram = 0;
 
         if (xqc_send_ctl_indirectly_ack_or_drop_po(conn, po)) {
+            xqc_send_ctl_recover_stale_next(&next, &conn->conn_send_queue->sndq_unacked_packets[XQC_PNS_APP_DATA]);
             continue;
         }
 

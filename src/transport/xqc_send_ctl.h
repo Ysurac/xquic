@@ -260,6 +260,14 @@ void xqc_send_ctl_on_packet_acked(xqc_send_ctl_t *send_ctl, xqc_packet_out_t *ac
 
 void xqc_send_queue_maybe_remove_unacked(xqc_packet_out_t *packet_out, xqc_send_queue_t *send_queue, xqc_path_ctx_t *path);
 
+/* See the definition in xqc_send_ctl.c for the full explanation: call this
+ * right after xqc_send_queue_maybe_remove_unacked() /
+ * xqc_send_ctl_indirectly_ack_or_drop_po() inside any xqc_list_for_each_safe()
+ * over sndq_unacked_packets[pns], to recover if the call's side-effect
+ * removal of a redundant-scheduler replica's origin happened to invalidate
+ * the loop's already-cached `next` pointer. */
+void xqc_send_ctl_recover_stale_next(xqc_list_head_t **next, xqc_list_head_t *list_head);
+
 /* G-F9 (draft-21 §4.3 ¶12) + G-F19 (§4.6 ¶8): returns 1 if the lost
  * packet's content is stale (superseded by newer state) and SHOULD NOT
  * be replayed. Otherwise 0. Called from the XQC_NEED_REPAIR arm of

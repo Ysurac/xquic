@@ -3212,6 +3212,7 @@ xqc_path_send_one_or_two_ack_elicit_pkts(xqc_path_ctx_t *path, xqc_pkt_num_space
         packet_out = xqc_list_entry(pos, xqc_packet_out_t, po_list);
 
         if (xqc_send_ctl_indirectly_ack_or_drop_po(c, packet_out)) {
+            xqc_send_ctl_recover_stale_next(&next, sndq);
             continue;
         }
 
