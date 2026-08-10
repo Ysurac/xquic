@@ -52,6 +52,7 @@
 #include "xqc_wlb_test.h"
 #include "xqc_wrr_test.h"
 #include "xqc_redundant_test.h"
+#include "xqc_dscp_test.h"
 #include "xqc_send_ctl_test.h"
 #include "xqc_vn_test.h"
 #include "xqc_frame_type_bit_test.h"
@@ -334,6 +335,13 @@ main()
         || !CU_add_test(pSuite, "xqc_test_redundant_reinject_call_returns_single_path_no_replica", xqc_test_redundant_reinject_call_returns_single_path_no_replica)
         || !CU_add_test(pSuite, "xqc_test_redundant_all_paths_cwnd_blocked_returns_null_and_cc_blocked", xqc_test_redundant_all_paths_cwnd_blocked_returns_null_and_cc_blocked)
         || !CU_add_test(pSuite, "xqc_test_redundant_single_path_no_replica_no_crash", xqc_test_redundant_single_path_no_replica_no_crash)
+        || !CU_add_test(pSuite, "xqc_test_dscp_untagged_uses_minrtt_ignoring_masks", xqc_test_dscp_untagged_uses_minrtt_ignoring_masks)
+        || !CU_add_test(pSuite, "xqc_test_dscp_tagged_routes_to_assigned_path", xqc_test_dscp_tagged_routes_to_assigned_path)
+        || !CU_add_test(pSuite, "xqc_test_dscp_tagged_breaks_tie_by_minrtt_among_assigned", xqc_test_dscp_tagged_breaks_tie_by_minrtt_among_assigned)
+        || !CU_add_test(pSuite, "xqc_test_dscp_tagged_falls_back_to_minrtt_when_assigned_path_blocked", xqc_test_dscp_tagged_falls_back_to_minrtt_when_assigned_path_blocked)
+        || !CU_add_test(pSuite, "xqc_test_dscp_tagged_falls_back_to_minrtt_when_no_path_assigned", xqc_test_dscp_tagged_falls_back_to_minrtt_when_no_path_assigned)
+        || !CU_add_test(pSuite, "xqc_test_dscp_all_paths_cwnd_blocked_returns_null_and_cc_blocked", xqc_test_dscp_all_paths_cwnd_blocked_returns_null_and_cc_blocked)
+        || !CU_add_test(pSuite, "xqc_test_dscp_unassigned_path_still_used_as_fallback", xqc_test_dscp_unassigned_path_still_used_as_fallback)
         /* ADD TESTS HERE */)
     {
         CU_cleanup_registry();

@@ -244,6 +244,7 @@ set(
     "src/transport/scheduler/xqc_scheduler_wrtt.c"
     "src/transport/scheduler/xqc_scheduler_wrr.c"
     "src/transport/scheduler/xqc_scheduler_redundant.c"
+    "src/transport/scheduler/xqc_scheduler_dscp.c"
 )
 
 if(XQC_ENABLE_MP_INTEROP)

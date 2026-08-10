@@ -1115,6 +1115,7 @@ XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_wlb_schedule
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_wrtt_scheduler_cb;
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_wrr_scheduler_cb;
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_redundant_scheduler_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_dscp_scheduler_cb;
 #ifdef XQC_ENABLE_MP_INTEROP
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_interop_scheduler_cb;
 #endif
@@ -1126,6 +1127,24 @@ XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_interop_sche
  */
 XQC_EXPORT_PUBLIC_API
 void xqc_conn_set_dgram_flow_hash(xqc_connection_t *conn, uint32_t flow_hash);
+
+/**
+ * @brief Build a DSCP class bitmask for xqc_conn_set_path_dscp_mask(), e.g.
+ * xqc_conn_set_path_dscp_mask(engine, cid, path_id,
+ *                              XQC_DSCP_BIT(46) | XQC_DSCP_BIT(34));
+ * assigns EF (46) and AF41 (34) traffic to that path.
+ */
+#define XQC_DSCP_BIT(dscp) (1ULL << ((dscp) & 0x3F))
+
+/**
+ * @brief Set the DSCP tag hint for the DSCP scheduler before calling
+ * datagram_send(). dscp is a 6-bit DiffServ codepoint (0-63); values
+ * outside that range are masked down. dscp == 0 (the default) means
+ * "untagged" and is scheduled by plain MinRTT across every path.
+ * Must be called before each xqc_h3_ext_datagram_send() call.
+ */
+XQC_EXPORT_PUBLIC_API
+void xqc_conn_set_dscp(xqc_connection_t *conn, uint8_t dscp);
 
 typedef enum {
     XQC_REINJ_UNACK_AFTER_SCHED = 1 << 0,
@@ -2396,6 +2415,18 @@ xqc_int_t xqc_conn_mark_path_frozen(xqc_engine_t *engine, const xqc_cid_t *cid,
 XQC_EXPORT_PUBLIC_API
 xqc_int_t xqc_conn_set_path_weight(xqc_engine_t *engine, const xqc_cid_t *cid,
     uint64_t path_id, uint32_t weight);
+
+/**
+ * Set the DSCP class bitmask for a path (DSCP scheduler): bit N set means
+ * this path may carry packets tagged with DSCP class N (see
+ * xqc_conn_set_dscp() / XQC_DSCP_BIT()). A class may be assigned to more
+ * than one path (MinRTT breaks the tie); a path with mask 0 (the default)
+ * carries no dedicated class and is only used as a MinRTT fallback.
+ * Analogous to 'ip rule ... fwmark N table T'.
+ */
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_conn_set_path_dscp_mask(xqc_engine_t *engine, const xqc_cid_t *cid,
+    uint64_t path_id, uint64_t dscp_mask);
 
 /**
  * Calculate how many available paths on the current connection, i.e., paths which

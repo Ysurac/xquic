@@ -460,6 +460,9 @@ struct xqc_connection_s {
     uint64_t next_dgram_id;
     /* WLB scheduler: flow hash hint set by app before datagram_send() */
     uint32_t next_dgram_flow_hash;
+    /* DSCP scheduler: DSCP class hint set by app before datagram_send().
+     * 0 (default) means untagged. */
+    uint8_t next_dscp;
     xqc_list_head_t dgram_0rtt_buffer_list;
     uint16_t dgram_mss;
 

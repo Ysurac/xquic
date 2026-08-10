@@ -3947,6 +3947,12 @@ xqc_conn_set_dgram_flow_hash(xqc_connection_t *conn, uint32_t flow_hash)
     conn->next_dgram_flow_hash = flow_hash;
 }
 
+void
+xqc_conn_set_dscp(xqc_connection_t *conn, uint8_t dscp)
+{
+    conn->next_dscp = dscp & 0x3F;  /* DSCP is a 6-bit codepoint (0-63) */
+}
+
 xqc_conn_qos_stats_t
 xqc_conn_get_qos_stats(xqc_engine_t *engine, const xqc_cid_t *cid)
 {

@@ -108,6 +108,11 @@ typedef struct xqc_packet_out_s {
      * Set by application via xqc_conn_set_dgram_flow_hash() before send. */
     uint32_t                po_flow_hash;
 
+    /* DSCP scheduler: DSCP class for policy-routed path scheduling. 0
+     * means untagged (never set for non-datagram packets either).
+     * Set by application via xqc_conn_set_dscp() before send. */
+    uint8_t                 po_dscp;
+
     /* Multipath */
     uint16_t                po_path_flag;
     uint64_t                po_path_id;

@@ -1338,6 +1338,9 @@ xqc_write_datagram_frame_to_packet(xqc_connection_t *conn, xqc_pkt_type_t pkt_ty
     /* WLB scheduler: copy flow hash from connection for flow-affinity scheduling */
     packet_out->po_flow_hash = conn->next_dgram_flow_hash;
 
+    /* DSCP scheduler: copy DSCP class hint from connection */
+    packet_out->po_dscp = conn->next_dscp;
+
     return XQC_OK;
 }
 

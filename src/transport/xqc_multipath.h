@@ -158,6 +158,13 @@ struct xqc_path_ctx_s {
      * Set via xqc_conn_set_path_weight(). Analogous to ip route nexthop weight N. */
     uint32_t            path_weight;
 
+    /* DSCP class bitmask for the DSCP scheduler: bit N set means this path
+     * carries packets tagged with DSCP class N. 0 (default) means no
+     * dedicated class; the path is still eligible as a MinRTT fallback.
+     * Set via xqc_conn_set_path_dscp_mask(). Analogous to a policy-routing
+     * table selected by 'ip rule ... fwmark N'. */
+    uint64_t            path_dscp_mask;
+
     /* PTMUD */
     size_t              curr_pkt_out_size;
     size_t              path_max_pkt_out_size;
