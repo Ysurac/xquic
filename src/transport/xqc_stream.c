@@ -976,15 +976,15 @@ xqc_stream_record_trans_state(xqc_stream_t *stream, xqc_bool_t begin)
 }
 
 xqc_int_t
-xqc_stream_close(xqc_stream_t *stream)
+xqc_stream_close_with_error(xqc_stream_t *stream, uint64_t err_code)
 {
     xqc_int_t ret;
     xqc_connection_t *conn = stream->stream_conn;
     xqc_log(
         conn->log, XQC_LOG_DEBUG,
-        "|stream_id:%ui|stream_state_send:%d|stream_state_recv:%d|conn:%p|conn_state:%s|",
+        "|stream_id:%ui|stream_state_send:%d|stream_state_recv:%d|conn:%p|conn_state:%s|err_code:%ui|",
         stream->stream_id, stream->stream_state_send, stream->stream_state_recv, conn,
-        xqc_conn_state_2_str(conn->conn_state));
+        xqc_conn_state_2_str(conn->conn_state), err_code);
 
     XQC_STREAM_CLOSE_MSG(stream, "local reset");
 
@@ -995,8 +995,29 @@ xqc_stream_close(xqc_stream_t *stream)
         return XQC_OK;
     }
 
+    /* With conn_settings.defer_send_flush enabled, accepted bytes may still be
+     * queued when we get here, and the drop below discards them: an
+     * application that writes and then ABORTS a stream from the same callback
+     * loses that write.
+     *
+     * Flushing here first was tried and reverted, deliberately. Driving the
+     * engine from inside a close runs timers and application notifications
+     * re-entrantly — xqc_timer_stream_close_timeout() can xqc_destroy_stream()
+     * the very `stream` this function still holds (its guard above admits
+     * DATA_RECVD, which is below RESET_SENT), and a notification can re-enter
+     * close and set RESET_SENT without this invocation rechecking. It also
+     * no-ops entirely when called from inside an engine callback, which is
+     * precisely where the loss is hardest to avoid. A use-after-free is worse
+     * than the truncation it was meant to prevent.
+     *
+     * The exposure is bounded: this is the abort path (xqc_stream_close()
+     * passes H3_REQUEST_CANCELLED), normal FIN completion retires streams via
+     * xqc_stream_maybe_need_close() without coming here, a connection already
+     * CLOSING returned above, and the peer receives RESET_STREAM so the
+     * truncation is visible rather than silent. Recorded in the
+     * defer_send_flush field doc in xquic.h. */
     xqc_send_queue_drop_stream_frame_packets(conn, stream->stream_id);
-    ret = xqc_write_reset_stream_to_packet(conn, stream, H3_REQUEST_CANCELLED,
+    ret = xqc_write_reset_stream_to_packet(conn, stream, err_code,
                                            stream->stream_send_offset);
     if (ret < 0) {
         xqc_log(conn->log, XQC_LOG_ERROR, "|xqc_write_reset_stream_to_packet error|%d|",
@@ -1008,7 +1029,7 @@ xqc_stream_close(xqc_stream_t *stream)
        Known" states */
     if (stream->stream_state_recv == XQC_RECV_STREAM_ST_RECV ||
         stream->stream_state_recv == XQC_RECV_STREAM_ST_SIZE_KNOWN) {
-        ret = xqc_write_stop_sending_to_packet(conn, stream, H3_REQUEST_CANCELLED);
+        ret = xqc_write_stop_sending_to_packet(conn, stream, err_code);
         if (ret < 0) {
             xqc_log(conn->log, XQC_LOG_ERROR,
                     "|xqc_write_stop_sending_to_packet error|%d|", ret);
@@ -1025,6 +1046,12 @@ xqc_stream_close(xqc_stream_t *stream)
     xqc_stream_shutdown_write(stream);
     xqc_engine_conn_logic(conn->engine, conn);
     return XQC_OK;
+}
+
+xqc_int_t
+xqc_stream_close(xqc_stream_t *stream)
+{
+    return xqc_stream_close_with_error(stream, H3_REQUEST_CANCELLED);
 }
 
 xqc_int_t
@@ -1556,6 +1583,9 @@ xqc_stream_recv(xqc_stream_t *stream, unsigned char *recv_buf, size_t recv_buf_s
             stream->stream_data_in.next_read_offset) {
             /* free frame */
             xqc_list_del_init(&stream_frame->sf_list);
+            if (stream->stream_data_in.buffered_frame_count > 0) {
+                stream->stream_data_in.buffered_frame_count--;
+            }
             xqc_free(stream_frame->data);
             xqc_free(stream_frame);
             continue;
@@ -1582,6 +1612,9 @@ xqc_stream_recv(xqc_stream_t *stream, unsigned char *recv_buf, size_t recv_buf_s
             read += frame_left;
             /* free frame */
             xqc_list_del_init(&stream_frame->sf_list);
+            if (stream->stream_data_in.buffered_frame_count > 0) {
+                stream->stream_data_in.buffered_frame_count--;
+            }
             xqc_free(stream_frame->data);
             xqc_free(stream_frame);
 

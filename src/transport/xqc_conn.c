@@ -310,6 +310,13 @@ xqc_server_set_conn_settings(xqc_engine_t *engine, const xqc_conn_settings_t *se
     engine->default_conn_settings.close_dgram_redundancy =
         settings->close_dgram_redundancy;
 
+    /* Server connections inherit from default_conn_settings, and this copier
+     * is field-by-field — unlike xqc_conn_create() below, which assigns the
+     * whole struct and so needs no per-field maintenance. Without this line a
+     * server that asked for deferral silently keeps flushing on every send.
+     * tests/unittest/xqc_set_conn_settings_test.c pins it. */
+    engine->default_conn_settings.defer_send_flush = settings->defer_send_flush;
+
 #ifdef XQC_ENABLE_FEC
     engine->default_conn_settings.enable_encode_fec = settings->enable_encode_fec;
     if (engine->default_conn_settings.enable_encode_fec) {
@@ -469,6 +476,55 @@ xqc_server_set_conn_settings(xqc_engine_t *engine, const xqc_conn_settings_t *se
     } else {
         engine->default_conn_settings.max_blocked_buf_per_conn = XQC_H3_CONN_MAX_BLOCKED_BUF_SIZE_DEFAULT;
     }
+}
+
+/*
+ * Flush the packets a send entry point has just queued — or leave that to the
+ * caller's next engine run, per conn_settings.defer_send_flush.
+ *
+ * With deferral off this is the original behavior: drive the connection
+ * immediately, so one write per call means one packet in the send queue and
+ * the burst path (xqc_path_send_burst_packets) never has more than one packet
+ * to batch.
+ *
+ * With it on, the caller writes a run of packets and drives the engine once
+ * afterwards, letting the burst path fill a real sendmmsg/GSO batch. All the
+ * deferred branch then owes is a wakeup, armed once per run. How much that
+ * wakeup is actually worth depends on the caller's set_event_timer — see the
+ * field doc in xquic.h. Callers must drive the engine after the run
+ * regardless.
+ *
+ * One knob for every send kind, read here rather than passed in: a flush
+ * drives the whole connection and all send kinds share one send queue, so
+ * per-kind deferral was never expressible anyway (see the field doc).
+ *
+ * Deferral also requires the conn to really be scheduled. Every caller has run
+ * xqc_engine_add_active_queue() by this point — the datagram entry points call
+ * it directly, the h3 stream one reaches it through xqc_stream_send() — and it
+ * sets XQC_CONN_FLAG_TICKING only on a successful push; if the push failed
+ * (priority-queue growth under memory pressure) the conn sits in neither
+ * engine queue and nothing would ever come back for it. Falling back to the
+ * immediate flush is exact rather than merely defensive: it processes this
+ * conn by pointer and so does not depend on the queues at all — which is
+ * precisely why the pre-deferral code could ignore that failure.
+ *
+ * Single audit point on purpose: every send entry point shares it, so the
+ * enabled and disabled paths cannot drift apart between them.
+ */
+void
+xqc_conn_flush_or_defer(xqc_connection_t *conn)
+{
+    if (conn->conn_settings.defer_send_flush
+        && (conn->conn_flag & XQC_CONN_FLAG_TICKING))
+    {
+        if (!conn->deferred_flush_pending) {
+            conn->deferred_flush_pending = 1;
+            xqc_engine_wakeup_once(conn->engine);
+        }
+        return;
+    }
+
+    xqc_engine_conn_logic(conn->engine, conn);
 }
 
 static const char *const xqc_conn_flag_to_str[XQC_CONN_FLAG_SHIFT_NUM] = {
@@ -1038,7 +1094,15 @@ xqc_conn_create(xqc_engine_t *engine, xqc_cid_t *dcid, xqc_cid_t *scid,
                                XQC_INITIAL_PATH_ID)) {
         goto fail;
     }
-    xqc_cid_set_mark_original(&xc->dcid_set, dcid, XQC_INITIAL_PATH_ID);
+    /*
+     * Only the client's self-generated initial DCID is NOT from the peer
+     * and should be excluded from the active_connection_id_limit count
+     * (RFC 9000 §18.2).  The server's dcid (client's SCID) IS from the
+     * peer and must count toward the limit.
+     */
+    if (type == XQC_CONN_TYPE_CLIENT) {
+        xqc_cid_set_mark_original(&xc->dcid_set, dcid, XQC_INITIAL_PATH_ID);
+    }
     xqc_cid_copy(&(xc->dcid_set.current_dcid), dcid);
     xqc_hex_dump(xc->dcid_set.current_dcid_str, dcid->cid_buf, dcid->cid_len);
     xc->dcid_set.current_dcid_str[dcid->cid_len * 2] = '\0';
@@ -1048,7 +1112,6 @@ xqc_conn_create(xqc_engine_t *engine, xqc_cid_t *dcid, xqc_cid_t *scid,
                                XQC_INITIAL_PATH_ID)) {
         goto fail;
     }
-    xqc_cid_set_mark_original(&xc->scid_set, scid, XQC_INITIAL_PATH_ID);
     xqc_cid_copy(&(xc->scid_set.user_scid), scid);
     xqc_hex_dump(xc->scid_set.original_scid_str, scid->cid_buf, scid->cid_len);
     xc->scid_set.original_scid_str[scid->cid_len * 2] = '\0';
@@ -3388,6 +3451,12 @@ xqc_conn_get_errno(xqc_connection_t *conn)
     return conn->conn_err;
 }
 
+xqc_conn_err_type_t
+xqc_conn_get_err_type(xqc_connection_t *conn)
+{
+    return conn->conn_err_type;
+}
+
 void *
 xqc_conn_get_ssl(xqc_connection_t *conn)
 {
@@ -5102,7 +5171,6 @@ xqc_conn_confirm_cid(xqc_connection_t *c, xqc_packet_t *pkt)
                         xqc_cid_set_get_used_cnt(&c->dcid_set, XQC_INITIAL_PATH_ID));
                 return ret;
             }
-            xqc_cid_set_mark_original(&c->dcid_set, &pkt->pkt_scid, XQC_INITIAL_PATH_ID);
         }
 
         if (XQC_OK != xqc_cid_is_equal(&c->dcid_set.current_dcid, &pkt->pkt_scid)) {
@@ -6824,6 +6892,16 @@ xqc_conn_set_early_remote_transport_params(xqc_connection_t *conn,
     }
 
     xqc_settings_copy_from_transport_params(&conn->remote_settings, params);
+
+    /*
+     * RFC 9000 §7.4.1: a client MUST NOT use remembered values for
+     * max_ack_delay, ack_delay_exponent, or stateless_reset_token.
+     * Reset them to defaults so the 0-RTT path never relies on stale values.
+     */
+    conn->remote_settings.max_ack_delay = XQC_DEFAULT_MAX_ACK_DELAY;
+    conn->remote_settings.ack_delay_exponent = XQC_DEFAULT_ACK_DELAY_EXPONENT;
+    conn->remote_settings.stateless_reset_token_present = 0;
+
     xqc_conn_update_flow_ctl_settings(conn);
     return XQC_OK;
 }

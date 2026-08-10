@@ -556,8 +556,21 @@ xqc_h3_stream_send_data(xqc_h3_stream_t *h3s, unsigned char *data, size_t data_s
             "|stream_id:%ui|data_size:%uz|write:%z|fin:%ud|conn:%p|", h3s->stream_id,
             data_size, write, (unsigned int)fin, h3s->h3c->conn);
 
+    /* The bulk send path: one call per application write. Flushing here means
+     * a caller issuing many writes per event-loop iteration flushes each one
+     * separately, so the burst path only ever sees one write's packets.
+     * conn_settings.defer_send_flush hands the flush to the caller's next
+     * engine run instead — see xqc_conn_flush_or_defer(). Reaching here means
+     * xqc_stream_send() accepted something, and it queues the conn on the
+     * engine before returning, so the deferred branch's XQC_CONN_FLAG_TICKING
+     * precondition holds; a fully-EAGAIN'd write returned above without ever
+     * flushing, both before and after this change.
+     *
+     * The manually_triggered_send guard is unchanged and still outermost: that
+     * mode means the application drives every send itself, which subsumes
+     * deferral. */
     if (!h3s->h3c->conn->engine->config->manually_triggered_send) {
-        xqc_engine_conn_logic(h3s->h3c->conn->engine, h3s->h3c->conn);
+        xqc_conn_flush_or_defer(h3s->h3c->conn);
     }
 
     return write;
@@ -847,8 +860,41 @@ xqc_h3_stream_process_control(xqc_h3_stream_t *h3s, unsigned char *data, size_t 
 
 
             case XQC_H3_FRM_MAX_PUSH_ID:
-                /* PUSH related is not implemented yet */
+                /*
+                 * RFC 9114 Section 7.2.7: servers cannot send MAX_PUSH_ID,
+                 * and a newly received maximum cannot decrease. Sections
+                 * 6.2.1 and 7.2.7 put all peer MAX_PUSH_ID frames on its
+                 * single control stream. RFC 9000 Section 2.2 delivers that
+                 * stream as ordered bytes, so packet reordering cannot
+                 * reorder these frames here. A decrease therefore indicates
+                 * an implementation error at the peer.
+                 */
+                if (h3c->conn->conn_type == XQC_CONN_TYPE_CLIENT) {
+                    xqc_log(h3c->log, XQC_LOG_ERROR,
+                            "|client received MAX_PUSH_ID from server|");
+                    xqc_h3_frm_reset_pctx(pctx);
+                    XQC_H3_CONN_ERR(h3c, H3_FRAME_UNEXPECTED,
+                                    -XQC_H3_INVALID_MAX_PUSH_ID);
+                    return -XQC_H3_INVALID_MAX_PUSH_ID;
+                }
+
+                if (h3c->max_stream_id_recvd
+                    > pl->max_push_id.push_id.vi)
+                {
+                    xqc_log(h3c->log, XQC_LOG_ERROR,
+                            "|MAX_PUSH_ID decreased|old:%ui|new:%ui|",
+                            h3c->max_stream_id_recvd,
+                            pl->max_push_id.push_id.vi);
+                    xqc_h3_frm_reset_pctx(pctx);
+                    XQC_H3_CONN_ERR(h3c, H3_ID_ERROR,
+                                    -XQC_H3_INVALID_MAX_PUSH_ID);
+                    return -XQC_H3_INVALID_MAX_PUSH_ID;
+                }
+
                 h3c->max_stream_id_recvd = pl->max_push_id.push_id.vi;
+                xqc_log(h3c->log, XQC_LOG_DEBUG,
+                        "|H3_MAX_PUSH_ID|max_push_id:%ui|",
+                        h3c->max_stream_id_recvd);
                 break;
 
             default:
@@ -1111,7 +1157,18 @@ xqc_h3_stream_process_request(xqc_h3_stream_t *h3s, unsigned char *data, size_t 
                 break;
 
             case XQC_H3_FRM_PUSH_PROMISE:
-                /* PUSH related is not implemented yet */
+                /*
+                 * RFC 9114 Section 7.2.5: clients cannot send PUSH_PROMISE.
+                 * Servers must reject one with H3_FRAME_UNEXPECTED.
+                 */
+                if (h3s->h3c->conn->conn_type == XQC_CONN_TYPE_SERVER) {
+                    xqc_log(h3s->log, XQC_LOG_ERROR,
+                            "|client PUSH_PROMISE on request stream|");
+                    xqc_h3_frm_reset_pctx(pctx);
+                    XQC_H3_CONN_ERR(h3s->h3c, H3_FRAME_UNEXPECTED,
+                                    -XQC_H3_REQUEST_FRAME_UNEXPECTED);
+                    return -XQC_H3_REQUEST_FRAME_UNEXPECTED;
+                }
                 break;
 
             /* RFC 9114 §7.2.4/§7.2.3/§7.2.6/§7.2.7: control-only frames on request stream */
@@ -1457,6 +1514,23 @@ xqc_h3_stream_process_bidi_type_unknown(xqc_h3_stream_t *h3s, unsigned char *dat
                 "|parse frame type success|frame_type:%xL|read:%z|", pctx->frame.type,
                 read);
 
+        /*
+         * RFC 9114 Section 7.2.5: reject a client PUSH_PROMISE even
+         * when it is the first frame and this stream's type is not
+         * determined yet.
+         */
+        if (pctx->frame.type == XQC_H3_FRM_PUSH_PROMISE
+            && h3s->h3c->conn->conn_type == XQC_CONN_TYPE_SERVER)
+        {
+            xqc_log(h3s->log, XQC_LOG_ERROR,
+                    "|client PUSH_PROMISE on unknown bidi stream|");
+            xqc_h3_frm_reset_pctx(pctx);
+            XQC_H3_CONN_ERR(h3s->h3c, H3_FRAME_UNEXPECTED,
+                            -XQC_H3_REQUEST_FRAME_UNEXPECTED);
+            return -XQC_H3_REQUEST_FRAME_UNEXPECTED;
+        }
+
+
         if (pctx->frame.type != XQC_H3_EXT_FRM_BIDI_STREAM_TYPE) {
             /* the first frame is not BIDI_STREAM_TYPE */
             ret = xqc_h3_stream_create_inner_request_stream(h3s);
@@ -1607,12 +1681,18 @@ xqc_h3_stream_process_in(xqc_h3_stream_t *h3s, unsigned char *data, size_t data_
                 errcode = -XQC_H3_EPROC_BYTESTREAM;
             }
 
-            if (processed == -XQC_H3_INVALID_HEADER) {
-                /* RFC 9114 §4.1.2: malformed request/response headers
-                 * MUST be treated as H3_MESSAGE_ERROR, not as a generic
-                 * protocol error. This path covers QPACK decode failures
-                 * surfaced as -XQC_H3_INVALID_HEADER. */
-                XQC_H3_CONN_ERR(h3c, H3_MESSAGE_ERROR, errcode);
+            if (processed == -XQC_H3_INVALID_HEADER
+                && h3c->conn->conn_err == 0)
+            {
+                /*
+                 * RFC 9114 Section 4.1.2 requires a malformed message to
+                 * be treated as an H3_MESSAGE_ERROR stream error. Consume
+                 * the processing error after resetting this stream so the
+                 * caller does not promote it to a connection error.
+                 */
+                xqc_stream_close_with_error(h3s->stream,
+                                            H3_MESSAGE_ERROR);
+                return XQC_OK;
 
             } else {
                 XQC_H3_CONN_ERR(h3c, H3_FRAME_ERROR, errcode);

@@ -398,6 +398,7 @@ struct xqc_connection_s {
     uint32_t wakeup_pq_index;
 
     uint64_t conn_err;
+    xqc_conn_err_type_t conn_err_type;
     const char *conn_close_msg;
 
     /* for multi-path */
@@ -432,7 +433,7 @@ struct xqc_connection_s {
 
     /* for qlog */
     uint32_t MTU_updated_count;
-    uint32_t packet_dropped_count;
+    uint64_t packet_dropped_count; /**< RFC 9001 §6.6: decryption failure count across all keys */
 
 
     const xqc_scheduler_callback_t *scheduler_callback;
@@ -463,6 +464,18 @@ struct xqc_connection_s {
     /* DSCP scheduler: DSCP class hint set by app before datagram_send().
      * 0 (default) means untagged. */
     uint8_t next_dscp;
+    /* conn_settings.defer_send_flush: "a wakeup has been armed for work this
+     * conn has not been run for yet", so further deferred sends in the same
+     * run skip re-arming. Set in xqc_conn_flush_or_defer,
+     * cleared at the end of xqc_engine_process_conn — deliberately at the end,
+     * so a deferred send issued from a callback the engine invokes mid-run
+     * (e.g. a datagram or stream write-notify) does not leave the flag set on
+     * a run that already flushed it.
+     *
+     * ONE flag for both send kinds on purpose: it records a property of the
+     * run, not of what was written, and a wakeup armed by a datagram send is
+     * exactly the wakeup a stream send in the same run would have armed. */
+    uint8_t deferred_flush_pending;
     xqc_list_head_t dgram_0rtt_buffer_list;
     uint16_t dgram_mss;
 
@@ -798,4 +811,6 @@ void xqc_conn_set_init_idle_timeout(xqc_connection_t *conn,
 void xqc_conn_try_to_enable_pmtud(xqc_connection_t *conn);
 
 xqc_int_t xqc_conn_server_accept(xqc_connection_t *c);
+
+void xqc_conn_flush_or_defer(xqc_connection_t *conn);
 #endif /* _XQC_CONN_H_INCLUDED_ */

@@ -290,8 +290,8 @@ xqc_int_t xqc_datagram_send(xqc_connection_t *conn, void *data,
         xqc_log(conn->log, XQC_LOG_DEBUG, "|start_dgram_probe_timer|data_len:%z|", data_len);
     }
 
-    /* call main logic to send packets out */
-    xqc_engine_conn_logic(conn->engine, conn);
+    /* call main logic to send packets out (or defer it, see the helper) */
+    xqc_conn_flush_or_defer(conn);
 
     return XQC_OK;
 }
@@ -411,8 +411,8 @@ xqc_datagram_send_on_path(xqc_connection_t *conn, void *data,
                 data_len, path_id);
     }
 
-    /* call main logic to send packets out */
-    xqc_engine_conn_logic(conn->engine, conn);
+    /* call main logic to send packets out (or defer it, see the helper) */
+    xqc_conn_flush_or_defer(conn);
 
     return XQC_OK;
 }
@@ -586,8 +586,8 @@ xqc_datagram_send_multiple_internal(xqc_connection_t *conn,
             xqc_log(conn->log, XQC_LOG_DEBUG, "|start_dgram_probe_timer|data_len:%z|", data_len);
         }
 
-        /* call main logic to send packets out */
-        xqc_engine_conn_logic(conn->engine, conn);
+        /* call main logic to send packets out (or defer it, see the helper) */
+        xqc_conn_flush_or_defer(conn);
     }
 
     return ret < 0 ? ret : XQC_OK;
