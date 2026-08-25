@@ -1026,18 +1026,11 @@ xqc_wlb_scheduler_get_path(void *scheduler,
         }
     }
 
-    /* Prompt new-path detection (decoupled from the 1/sec wlb_flow_expire
-     * throttle). wlb_flow_expire is the only place that flags path-count
-     * increases, but it runs at most once per second; a secondary path that
-     * becomes active just after an expire() run is therefore invisible to the
-     * scheduler for up to ~1s. During that blind window the primary path
-     * keeps warming its cwnd, and when the secondary finally enters s->paths
-     * the weight skew makes wlb_pick_pin_path assign EVERY flow to the warm
-     * primary (sym P=16 aggregation collapse: 17/0 pin split, confirmed via
-     * WLB_INSTR). Counting active paths here is O(paths) and only runs for
-     * flows that miss the pinned fast path, so steady-state pinned traffic
-     * pays nothing. We force a refresh only on an INCREASE — path losses are
-     * already handled by wlb_flow_expire's failover logic. */
+    /* Keep the WRR cache aligned with live topology without waiting for the
+     * 1/sec flow-expiry sweep. Datagram flows need prompt path-count increase
+     * detection before their first pin. STREAM data has no flow-table fast
+     * path, so compare its full ordered path-ID set as well; this also admits
+     * a replacement relay path when the active count remains unchanged. */
     if ((stream_data && !wlb_active_paths_match_cache(s, conn))
         || (!stream_data && wlb_count_active_paths(conn) > s->n_paths))
     {
