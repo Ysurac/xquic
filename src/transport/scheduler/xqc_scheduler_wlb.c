@@ -1,9 +1,9 @@
 /**
  * @copyright Copyright (c) 2026, mp0rta
  *
- * WLB (Weighted Load Balancing) multipath scheduler for QUIC Datagrams.
+ * WLB (Weighted Load Balancing) multipath scheduler for QUIC application data.
  *
- * Key difference from MinRTT: packets belonging to the same inner flow
+ * Datagram packets belonging to the same inner flow
  * (identified by po_flow_hash) are pinned to the same QUIC path.  This
  * prevents TCP reordering inside VPN tunnels while still aggregating
  * bandwidth across paths via weighted round-robin of flows.
@@ -797,8 +797,8 @@ wlb_wrr_select(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
 /* ================================================================
  *  MinRTT fallback
  *
- *  Used for non-datagram packets (po_flow_hash == 0) and when WRR
- *  has no active paths.  Selects the path with the lowest SRTT that
+ *  Used for control packets and when WRR has no active paths. Selects the
+ *  path with the lowest SRTT that
  *  has cwnd headroom.
  * ================================================================ */
 
@@ -885,9 +885,10 @@ xqc_wlb_scheduler_init(void *scheduler, xqc_log_t *log, xqc_scheduler_params_t *
 /**
  * Main scheduling entry point.
  *
- * 1. po_flow_hash == 0 (non-datagram packets) → MinRTT fallback.
- * 2. po_flow_hash == UNPINNED (UDP/QUIC)      → WRR without flow table.
- * 3. Otherwise (TCP)                           → flow table lookup + WRR with pinning.
+ * 1. STREAM data (Hybrid TCP lane)             → WRR without flow table.
+ * 2. po_flow_hash == 0 (control packets)       → MinRTT fallback.
+ * 3. po_flow_hash == UNPINNED (UDP/QUIC)       → WRR without flow table.
+ * 4. Otherwise (TCP datagrams)                 → flow table lookup + WRR with pinning.
  */
 static xqc_path_ctx_t *
 xqc_wlb_scheduler_get_path(void *scheduler,
@@ -904,8 +905,13 @@ xqc_wlb_scheduler_get_path(void *scheduler,
         return wlb_minrtt_fallback(conn, packet_out, check_cwnd, reinject, cc_blocked);
     }
 
-    /* Non-datagram packets → MinRTT fallback */
-    if (packet_out->po_flow_hash == 0) {
+    /* Hybrid lane bytes are reliable QUIC STREAM data. QUIC reassembly
+     * absorbs cross-path reordering, so schedule these packets per-packet
+     * across available paths. Keep ACK and other control-only packets on
+     * MinRTT so application-data balancing does not delay control traffic. */
+    xqc_bool_t stream_data =
+        (packet_out->po_frame_types & XQC_FRAME_BIT_STREAM) != 0;
+    if (packet_out->po_flow_hash == 0 && !stream_data) {
         return wlb_minrtt_fallback(conn, packet_out, check_cwnd, reinject, cc_blocked);
     }
 
@@ -914,7 +920,8 @@ xqc_wlb_scheduler_get_path(void *scheduler,
     }
 
     /* TCP flows are pinned to paths; UDP/QUIC use per-packet WRR */
-    xqc_bool_t pin_flow = (packet_out->po_flow_hash != WLB_FLOW_HASH_UNPINNED);
+    xqc_bool_t pin_flow =
+        (!stream_data && packet_out->po_flow_hash != WLB_FLOW_HASH_UNPINNED);
 
     uint64_t now_us = xqc_monotonic_timestamp();
 
@@ -1004,7 +1011,10 @@ xqc_wlb_scheduler_get_path(void *scheduler,
      * flows that miss the pinned fast path, so steady-state pinned traffic
      * pays nothing. We force a refresh only on an INCREASE — path losses are
      * already handled by wlb_flow_expire's failover logic. */
-    if (wlb_count_active_paths(conn) > s->n_paths) {
+    int active_path_count = wlb_count_active_paths(conn);
+    if (active_path_count > s->n_paths
+        || (stream_data && active_path_count != s->n_paths))
+    {
         s->force_refresh_paths = 1;
     }
 
@@ -1097,7 +1107,8 @@ static void
 xqc_wlb_scheduler_handle_path_event(void *scheduler,
     xqc_path_ctx_t *path, xqc_scheduler_path_event_t event, void *event_arg)
 {
-    /* No action needed — weights are recomputed at round boundary */
+    xqc_wlb_scheduler_t *s = (xqc_wlb_scheduler_t *)scheduler;
+    s->force_refresh_paths = 1;
 }
 
 static void

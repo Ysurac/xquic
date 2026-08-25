@@ -222,6 +222,19 @@ wlb_test_invoke_ex(wlb_test_fixture_t *f, uint32_t flow_hash,
     return p ? p->path_id : UINT64_MAX;
 }
 
+static uint64_t
+wlb_test_invoke_stream(wlb_test_fixture_t *f)
+{
+    xqc_packet_out_t po;
+    wlb_test_make_packet_out(&po, 0);
+    po.po_frame_types = XQC_FRAME_BIT_STREAM;
+    xqc_bool_t cc_blk = XQC_FALSE;
+    xqc_path_ctx_t *p = xqc_wlb_scheduler_cb.xqc_scheduler_get_path(
+        f->scheduler, &f->conn, &po,
+        /* check_cwnd */ 1, /* reinject */ 0, &cc_blk);
+    return p ? p->path_id : UINT64_MAX;
+}
+
 /* ───────────────────────── tests ───────────────────────── */
 
 /* I1: asymmetric paths, single TCP flow → pin lands on wide path.
@@ -570,6 +583,32 @@ xqc_test_wlb_reinject_bypasses_pin(void)
                                               /* reinject */ 1);
     CU_ASSERT_NOT_EQUAL(reinj_path, 0);
     CU_ASSERT_EQUAL(reinj_path, 1 /* only remaining path */);
+
+    wlb_test_teardown(&f);
+}
+
+void
+xqc_test_wlb_stream_data_distributes(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    wlb_test_add_path(&f, 1, 25000, 64 * 1024, 0);
+
+    int on_path0 = 0;
+    int on_path1 = 0;
+    for (int i = 0; i < 8; i++) {
+        uint64_t selected = wlb_test_invoke_stream(&f);
+        if (selected == 0) {
+            on_path0++;
+        } else if (selected == 1) {
+            on_path1++;
+        }
+    }
+
+    CU_ASSERT_TRUE(on_path0 > 0);
+    CU_ASSERT_TRUE(on_path1 > 0);
 
     wlb_test_teardown(&f);
 }

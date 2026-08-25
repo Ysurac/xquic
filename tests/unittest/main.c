@@ -388,6 +388,7 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_wlb_single_path_does_not_pin", xqc_test_wlb_single_path_does_not_pin)
         || !CU_add_test(pSuite, "xqc_test_wlb_new_path_detected_without_expire_throttle", xqc_test_wlb_new_path_detected_without_expire_throttle)
         || !CU_add_test(pSuite, "xqc_test_wlb_reinject_bypasses_pin", xqc_test_wlb_reinject_bypasses_pin)
+        || !CU_add_test(pSuite, "xqc_test_wlb_stream_data_distributes", xqc_test_wlb_stream_data_distributes)
         /* ADD TESTS HERE */)
     {
         CU_cleanup_registry();

@@ -58,4 +58,9 @@ void xqc_test_wlb_new_path_detected_without_expire_throttle(void);
  * flow whose replica's po_path_id equals the pinned path. */
 void xqc_test_wlb_reinject_bypasses_pin(void);
 
+/* Hybrid TCP lane bytes are QUIC STREAM data with po_flow_hash == 0.
+ * They must use unpinned weighted scheduling so one inner TCP flow can
+ * consume multiple paths; ACK/control-only packets remain on MinRTT. */
+void xqc_test_wlb_stream_data_distributes(void);
+
 #endif /* XQC_WLB_TEST_H_INCLUDED */
