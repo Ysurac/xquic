@@ -57,6 +57,8 @@ main(void)
                                xqc_test_wlb_control_packets_use_minrtt)
         || NULL == CU_add_test(s, "blackholed_path_does_not_stall_rounds",
                                xqc_test_wlb_blackholed_path_does_not_stall_rounds)
+        || NULL == CU_add_test(s, "unpinned_blackhole_refreshes_topology",
+                               xqc_test_wlb_unpinned_blackhole_refreshes_topology)
         || NULL == CU_add_test(s, "routine_path_event_preserves_round",
                                xqc_test_wlb_routine_path_event_preserves_round))
     {

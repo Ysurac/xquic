@@ -579,29 +579,6 @@ wlb_compute_weight(xqc_path_ctx_t *path, uint64_t max_rtt_us)
  * ================================================================ */
 
 /**
- * Count active, healthy paths using the SAME predicate as wlb_refresh_paths
- * (wlb_path_schedulable). Cheap O(paths) scan used to detect a
- * newly-active path promptly, decoupled from the 1/sec wlb_flow_expire
- * throttle. Must match refresh's predicate exactly so the count is directly
- * comparable to s->n_paths (otherwise it would force-refresh every call).
- */
-static int
-wlb_count_active_paths(xqc_connection_t *conn)
-{
-    int n = 0;
-    xqc_list_head_t *pos, *next;
-    xqc_path_ctx_t  *path;
-    xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
-        path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-        if (!wlb_path_schedulable(path)) {
-            continue;
-        }
-        n++;
-    }
-    return n;
-}
-
-/**
  * Compare the cached WRR path IDs with the active connection path list.
  * Refresh builds the cache in connection-list order, so an ordered comparison
  * detects both count changes and constant-count path replacement in O(paths).
@@ -1018,14 +995,11 @@ xqc_wlb_scheduler_get_path(void *scheduler,
         }
     }
 
-    /* Keep the WRR cache aligned with live topology without waiting for the
-     * 1/sec flow-expiry sweep. Datagram flows need prompt path-count increase
-     * detection before their first pin. STREAM data has no flow-table fast
-     * path, so compare its full ordered path-ID set as well; this also admits
-     * a replacement relay path when the active count remains unchanged. */
-    if ((stream_data && !wlb_active_paths_match_cache(s, conn))
-        || (!stream_data && wlb_count_active_paths(conn) > s->n_paths))
-    {
+    /* Keep the WRR cache aligned with the full live path set for every data
+     * mode. A count-only check misses path removal and equal-count replacement;
+     * the stale path then retains an undrainable positive deficit and can
+     * monopolise scheduling when it recovers. */
+    if (!wlb_active_paths_match_cache(s, conn)) {
         s->force_refresh_paths = 1;
     }
 

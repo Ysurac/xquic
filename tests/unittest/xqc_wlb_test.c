@@ -738,6 +738,44 @@ xqc_test_wlb_blackholed_path_does_not_stall_rounds(void)
 }
 
 void
+xqc_test_wlb_unpinned_blackhole_refreshes_topology(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    /* Give the relay a larger initial quantum so a stale positive deficit is
+     * observable after it silently blackholes and later recovers. */
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    xqc_path_ctx_t *relay = wlb_test_add_path(&f, 1, 25000, 256 * 1024, 0);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(relay);
+
+    /* Prime the WRR cache while both paths are healthy.  UINT32_MAX is the
+     * production sentinel for per-packet, unpinned UDP/QUIC datagrams. */
+    (void)wlb_test_invoke(&f, UINT32_MAX);
+
+    relay->path_send_ctl->ctl_pto_count = 3;
+    for (int i = 0; i < 32; i++) {
+        CU_ASSERT_EQUAL(wlb_test_invoke(&f, UINT32_MAX), 0);
+    }
+
+    relay->path_send_ctl->ctl_pto_count = 0;
+    int on_direct = 0;
+    int on_relay = 0;
+    for (int i = 0; i < 32; i++) {
+        uint64_t selected = wlb_test_invoke(&f, UINT32_MAX);
+        if (selected == 0) {
+            on_direct++;
+        } else if (selected == 1) {
+            on_relay++;
+        }
+    }
+    CU_ASSERT_TRUE(on_direct > 0);
+    CU_ASSERT_TRUE(on_relay > 0);
+
+    wlb_test_teardown(&f);
+}
+
+void
 xqc_test_wlb_routine_path_event_preserves_round(void)
 {
     wlb_test_fixture_t baseline;
