@@ -84,5 +84,9 @@ void xqc_test_wlb_topology_refresh_clears_pin_deficit(void);
 void xqc_test_wlb_ewma_uses_exact_seven_eighths_history(void);
 void xqc_test_wlb_loss_above_two_percent_downweights_path(void);
 void xqc_test_wlb_public_scid_policy_and_truncated_stats(void);
+void xqc_test_wlb_control_delivery_does_not_advance_learning(void);
+void xqc_test_wlb_application_delivery_advances_learning(void);
+void xqc_test_wlb_latency_policy_populates_stats_before_payload(void);
+void xqc_test_wlb_latency_policy_syncs_path_add_remove(void);
 
 #endif /* XQC_WLB_TEST_H_INCLUDED */

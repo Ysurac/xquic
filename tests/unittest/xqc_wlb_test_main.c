@@ -92,7 +92,15 @@ main(void)
         || NULL == CU_add_test(s, "loss_above_two_percent_downweights_path",
                                xqc_test_wlb_loss_above_two_percent_downweights_path)
         || NULL == CU_add_test(s, "public_scid_policy_and_truncated_stats",
-                               xqc_test_wlb_public_scid_policy_and_truncated_stats))
+                               xqc_test_wlb_public_scid_policy_and_truncated_stats)
+        || NULL == CU_add_test(s, "control_delivery_does_not_advance_learning",
+                               xqc_test_wlb_control_delivery_does_not_advance_learning)
+        || NULL == CU_add_test(s, "application_delivery_advances_learning",
+                               xqc_test_wlb_application_delivery_advances_learning)
+        || NULL == CU_add_test(s, "latency_policy_populates_stats_before_payload",
+                               xqc_test_wlb_latency_policy_populates_stats_before_payload)
+        || NULL == CU_add_test(s, "latency_policy_syncs_path_add_remove",
+                               xqc_test_wlb_latency_policy_syncs_path_add_remove))
     {
         CU_cleanup_registry();
         return (int)CU_get_error();

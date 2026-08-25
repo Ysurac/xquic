@@ -97,6 +97,8 @@ typedef struct {
     int64_t     pin_deficit;
     uint64_t    prior_delivered;
     uint64_t    prior_delivered_time_us;
+    uint64_t    app_delivered;
+    uint64_t    app_delivered_time_us;
     uint64_t    goodput_ewma_Bps;
     uint64_t    warmup_started_us;
     uint64_t    warmup_acked_bytes;
@@ -406,20 +408,20 @@ static uint64_t
 wlb_compute_goodput_weight(wlb_path_weight_t *entry, xqc_path_ctx_t *path)
 {
     xqc_send_ctl_t *ctl = path->path_send_ctl;
-    if (ctl->ctl_delivered > entry->prior_delivered
-        && ctl->ctl_delivered_time > entry->prior_delivered_time_us)
+    if (entry->app_delivered > entry->prior_delivered
+        && entry->app_delivered_time_us > entry->prior_delivered_time_us)
     {
         uint64_t delivered =
-            ctl->ctl_delivered - entry->prior_delivered;
+            entry->app_delivered - entry->prior_delivered;
         uint64_t elapsed =
-            ctl->ctl_delivered_time - entry->prior_delivered_time_us;
+            entry->app_delivered_time_us - entry->prior_delivered_time_us;
         uint64_t sample_Bps = (delivered * 1000000) / elapsed;
 
         entry->goodput_ewma_Bps =
             (7 * entry->goodput_ewma_Bps + sample_Bps) / 8;
         entry->warmup_acked_bytes += delivered;
-        entry->prior_delivered = ctl->ctl_delivered;
-        entry->prior_delivered_time_us = ctl->ctl_delivered_time;
+        entry->prior_delivered = entry->app_delivered;
+        entry->prior_delivered_time_us = entry->app_delivered_time_us;
     }
 
     if (entry->warmup
@@ -566,7 +568,8 @@ wlb_note_payload_activity(xqc_wlb_scheduler_t *s, uint64_t path_id,
  * Delivery learning is preserved by path ID; scheduling deficits are reset.
  */
 static void
-wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
+wlb_rebuild_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
+                  xqc_bool_t sample_delivery)
 {
     xqc_list_head_t *pos, *next;
     xqc_path_ctx_t  *path;
@@ -600,9 +603,7 @@ wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
         entry.path_id = path->path_id;
         entry.warmup = XQC_TRUE;
         entry.warmup_started_us = xqc_monotonic_timestamp();
-        entry.prior_delivered = path->path_send_ctl->ctl_delivered;
-        entry.prior_delivered_time_us =
-            path->path_send_ctl->ctl_delivered_time;
+        entry.prior_delivered_time_us = entry.warmup_started_us;
         for (int j = 0; j < old_n; j++) {
             if (old[j].path_id == path->path_id) {
                 entry = old[j];
@@ -612,17 +613,35 @@ wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
         entry.deficit = 0;
         entry.pin_deficit = 0;
         s->paths[n] = entry;
-        raw_weights[n] = wlb_compute_goodput_weight(&s->paths[n], path);
+        if (sample_delivery) {
+            raw_weights[n] =
+                wlb_compute_goodput_weight(&s->paths[n], path);
+        }
         n++;
     }
     s->n_paths = n;
-    if (n > 0) {
+    if (sample_delivery && n > 0) {
         wlb_normalize_weights(s, raw_weights);
+    }
+    if (!sample_delivery) {
+        s->round_remaining = 0;
     }
 
     if (old != NULL) {
         xqc_free(old);
     }
+}
+
+static void
+wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
+{
+    wlb_rebuild_paths(s, conn, XQC_TRUE);
+}
+
+static void
+wlb_sync_paths_for_status(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
+{
+    wlb_rebuild_paths(s, conn, XQC_FALSE);
 }
 
 /**
@@ -832,26 +851,42 @@ xqc_wlb_scheduler_set_policy(void *scheduler, xqc_connection_t *conn,
         s->paths[i].deficit = 0;
         s->paths[i].pin_deficit = 0;
         if (policy == XQC_WLB_MAX_THROUGHPUT) {
-            xqc_path_ctx_t *path =
-                wlb_find_path_ctx(conn, s->paths[i].path_id);
             s->paths[i].warmup = XQC_TRUE;
             s->paths[i].warmup_started_us = xqc_monotonic_timestamp();
             s->paths[i].warmup_acked_bytes = 0;
             s->paths[i].warmup_active_us = 0;
             s->paths[i].last_payload_schedule_us = 0;
             s->paths[i].goodput_ewma_Bps = 0;
-            if (path != NULL && path->path_send_ctl != NULL) {
-                s->paths[i].prior_delivered =
-                    path->path_send_ctl->ctl_delivered;
-                s->paths[i].prior_delivered_time_us =
-                    path->path_send_ctl->ctl_delivered_time;
-            } else {
-                s->paths[i].prior_delivered = 0;
-                s->paths[i].prior_delivered_time_us = 0;
-            }
+            s->paths[i].prior_delivered = s->paths[i].app_delivered;
+            s->paths[i].prior_delivered_time_us =
+                xqc_monotonic_timestamp();
         }
     }
     return XQC_OK;
+}
+
+void
+xqc_wlb_scheduler_on_app_packet_acked(void *scheduler, uint64_t path_id,
+                                      uint64_t payload_bytes,
+                                      uint64_t ack_time_us)
+{
+    if (scheduler == NULL || payload_bytes == 0) {
+        return;
+    }
+
+    xqc_wlb_scheduler_t *s = scheduler;
+    for (int i = 0; i < s->n_paths; i++) {
+        if (s->paths[i].path_id != path_id) {
+            continue;
+        }
+        if (UINT64_MAX - s->paths[i].app_delivered < payload_bytes) {
+            s->paths[i].app_delivered = UINT64_MAX;
+        } else {
+            s->paths[i].app_delivered += payload_bytes;
+        }
+        s->paths[i].app_delivered_time_us = ack_time_us;
+        break;
+    }
 }
 
 int
@@ -899,6 +934,17 @@ xqc_wlb_scheduler_get_path(void *scheduler,
 {
     xqc_wlb_scheduler_t *s = (xqc_wlb_scheduler_t *)scheduler;
 
+    if (s->policy == XQC_WLB_LOW_LATENCY) {
+        if (s->force_refresh_paths
+            || !wlb_active_paths_match_cache(s, conn))
+        {
+            wlb_sync_paths_for_status(s, conn);
+            s->force_refresh_paths = 0;
+        }
+        return wlb_minrtt_fallback(conn, packet_out, check_cwnd, reinject,
+                                   cc_blocked);
+    }
+
     /* Replicas exist to ride a DIFFERENT path than their origin; flow
      * pinning (ordering protection) is meaningless for a duplicate. Route
      * every reinjection query through the fallback, which already excludes
@@ -915,11 +961,6 @@ xqc_wlb_scheduler_get_path(void *scheduler,
         (packet_out->po_frame_types & XQC_FRAME_BIT_STREAM) != 0;
     if (packet_out->po_flow_hash == 0 && !stream_data) {
         return wlb_minrtt_fallback(conn, packet_out, check_cwnd, reinject, cc_blocked);
-    }
-
-    if (s->policy == XQC_WLB_LOW_LATENCY) {
-        return wlb_minrtt_fallback(conn, packet_out, check_cwnd, reinject,
-                                   cc_blocked);
     }
 
     if (cc_blocked) {

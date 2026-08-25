@@ -6043,6 +6043,7 @@ xqc_conn_reassemble_packet(xqc_connection_t *conn, xqc_packet_out_t *ori_po)
 
     /* copy packet_out info */
     new_po->po_frame_types = ori_po->po_frame_types;
+    new_po->po_dgram_payload_size = ori_po->po_dgram_payload_size;
     for (int i = 0; i < XQC_MAX_STREAM_FRAME_IN_PO; i++) {
         new_po->po_stream_frames[i] = ori_po->po_stream_frames[i];
     }
@@ -7121,15 +7122,52 @@ xqc_conn_get_queue_fin_timeout(xqc_connection_t *conn)
     return conn->conn_settings.fec_conn_queue_rpr_timeout;
 }
 
-void
-xqc_conn_decrease_unacked_stream_ref(xqc_connection_t *conn, xqc_packet_out_t *packet_out)
+static uint64_t
+xqc_conn_wlb_app_payload_bytes(xqc_packet_out_t *packet_out)
 {
-    int first_time_ack = 1;
-    if (packet_out->po_flag & XQC_POF_STREAM_UNACK) {
-        first_time_ack = first_time_ack && (!packet_out->po_acked);
-        if (packet_out->po_origin) {
-            first_time_ack = first_time_ack && (!packet_out->po_origin->po_acked);
+    uint64_t payload_bytes = 0;
+
+    if (packet_out->po_frame_types & XQC_FRAME_BIT_DATAGRAM) {
+        payload_bytes = packet_out->po_dgram_payload_size;
+    }
+
+    if (packet_out->po_frame_types & XQC_FRAME_BIT_STREAM) {
+        for (int i = 0; i < XQC_MAX_STREAM_FRAME_IN_PO; i++) {
+            if (packet_out->po_stream_frames[i].ps_is_used == 0) {
+                break;
+            }
+            uint64_t stream_bytes =
+                packet_out->po_stream_frames[i].ps_length;
+            if (UINT64_MAX - payload_bytes < stream_bytes) {
+                return UINT64_MAX;
+            }
+            payload_bytes += stream_bytes;
         }
+    }
+
+    return payload_bytes;
+}
+
+void
+xqc_conn_decrease_unacked_stream_ref(xqc_connection_t *conn,
+                                      xqc_packet_out_t *packet_out)
+{
+    int first_time_ack = !packet_out->po_acked;
+    if (packet_out->po_origin) {
+        first_time_ack = first_time_ack && !packet_out->po_origin->po_acked;
+    }
+
+    if (first_time_ack
+        && xqc_wlb_scheduler_is_callback(conn->scheduler_callback))
+    {
+        uint64_t payload_bytes =
+            xqc_conn_wlb_app_payload_bytes(packet_out);
+        xqc_wlb_scheduler_on_app_packet_acked(
+            conn->scheduler, packet_out->po_path_id, payload_bytes,
+            xqc_monotonic_timestamp());
+    }
+
+    if (packet_out->po_flag & XQC_POF_STREAM_UNACK) {
         if (first_time_ack) {
             xqc_stream_t *stream;
             for (int i = 0; i < XQC_MAX_STREAM_FRAME_IN_PO; i++) {
