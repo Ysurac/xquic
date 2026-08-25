@@ -1082,6 +1082,11 @@ typedef enum xqc_scheduler_conn_event_e {
     XQC_SCHED_EVENT_CONN_ROUND_FIN = 1,
 } xqc_scheduler_conn_event_t;
 
+typedef enum {
+    XQC_WLB_MAX_THROUGHPUT = 0,
+    XQC_WLB_LOW_LATENCY = 1,
+} xqc_wlb_policy_t;
+
 /**
  * @brief multipath scheduler callbacks
  */
@@ -1123,6 +1128,37 @@ XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_interop_sche
  */
 XQC_EXPORT_PUBLIC_API
 void xqc_conn_set_dgram_flow_hash(xqc_connection_t *conn, uint32_t flow_hash);
+
+/**
+ * Set the connection-local WLB scheduling policy.
+ *
+ * This function must be called from the engine thread. The connection is
+ * resolved by its source connection ID and must use the WLB scheduler.
+ */
+XQC_EXPORT_PUBLIC_API
+int xqc_conn_set_wlb_policy(xqc_engine_t *engine, const xqc_cid_t *scid,
+                            xqc_wlb_policy_t policy);
+
+typedef struct {
+    uint64_t path_id;
+    uint64_t goodput_Bps;
+    uint8_t weight_pct;
+    uint8_t warmup;
+    xqc_wlb_policy_t policy;
+} xqc_wlb_path_stats_t;
+
+/**
+ * Copy a bounded WLB path-stats snapshot.
+ *
+ * Must be called from the engine thread. *out_count is the number of
+ * eligible cached paths even when that exceeds capacity. At most
+ * capacity entries are copied. Returns an error when the connection is
+ * absent or does not use WLB.
+ */
+XQC_EXPORT_PUBLIC_API
+int xqc_conn_get_wlb_path_stats(xqc_engine_t *engine, const xqc_cid_t *scid,
+                                xqc_wlb_path_stats_t *out, size_t capacity,
+                                size_t *out_count);
 
 typedef enum {
     XQC_REINJ_UNACK_AFTER_SCHED = 1 << 0,

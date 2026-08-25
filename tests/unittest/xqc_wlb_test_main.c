@@ -60,7 +60,39 @@ main(void)
         || NULL == CU_add_test(s, "unpinned_blackhole_refreshes_topology",
                                xqc_test_wlb_unpinned_blackhole_refreshes_topology)
         || NULL == CU_add_test(s, "routine_path_event_preserves_round",
-                               xqc_test_wlb_routine_path_event_preserves_round))
+                               xqc_test_wlb_routine_path_event_preserves_round)
+        || NULL == CU_add_test(s, "equal_goodput_is_balanced",
+                               xqc_test_wlb_equal_goodput_is_balanced)
+        || NULL == CU_add_test(s, "four_to_one_goodput_after_acked_warmup",
+                               xqc_test_wlb_four_to_one_goodput_after_acked_warmup)
+        || NULL == CU_add_test(s, "new_path_gets_warmup_floor",
+                               xqc_test_wlb_new_path_gets_warmup_floor)
+        || NULL == CU_add_test(s, "steady_path_gets_exploration_floor",
+                               xqc_test_wlb_steady_path_gets_exploration_floor)
+        || NULL == CU_add_test(s, "active_time_ends_warmup",
+                               xqc_test_wlb_active_time_ends_warmup)
+        || NULL == CU_add_test(s, "idle_time_does_not_end_warmup",
+                               xqc_test_wlb_idle_time_does_not_end_warmup)
+        || NULL == CU_add_test(s, "latency_policy_uses_minrtt",
+                               xqc_test_wlb_latency_policy_uses_minrtt)
+        || NULL == CU_add_test(s, "path_stats_snapshot",
+                               xqc_test_wlb_path_stats_snapshot)
+        || NULL == CU_add_test(s, "pinned_flow_refreshes_delivery_sample",
+                               xqc_test_wlb_pinned_flow_refreshes_delivery_sample)
+        || NULL == CU_add_test(s, "warmup_time_only_credits_selected_path",
+                               xqc_test_wlb_warmup_time_only_credits_selected_path)
+        || NULL == CU_add_test(s, "throughput_policy_resets_delivery_learning",
+                               xqc_test_wlb_throughput_policy_resets_delivery_learning)
+        || NULL == CU_add_test(s, "topology_refresh_clears_packet_deficit",
+                               xqc_test_wlb_topology_refresh_clears_packet_deficit)
+        || NULL == CU_add_test(s, "topology_refresh_clears_pin_deficit",
+                               xqc_test_wlb_topology_refresh_clears_pin_deficit)
+        || NULL == CU_add_test(s, "ewma_uses_exact_seven_eighths_history",
+                               xqc_test_wlb_ewma_uses_exact_seven_eighths_history)
+        || NULL == CU_add_test(s, "loss_above_two_percent_downweights_path",
+                               xqc_test_wlb_loss_above_two_percent_downweights_path)
+        || NULL == CU_add_test(s, "public_scid_policy_and_truncated_stats",
+                               xqc_test_wlb_public_scid_policy_and_truncated_stats))
     {
         CU_cleanup_registry();
         return (int)CU_get_error();

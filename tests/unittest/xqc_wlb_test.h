@@ -68,5 +68,21 @@ void xqc_test_wlb_control_packets_use_minrtt(void);
 void xqc_test_wlb_blackholed_path_does_not_stall_rounds(void);
 void xqc_test_wlb_unpinned_blackhole_refreshes_topology(void);
 void xqc_test_wlb_routine_path_event_preserves_round(void);
+void xqc_test_wlb_equal_goodput_is_balanced(void);
+void xqc_test_wlb_four_to_one_goodput_after_acked_warmup(void);
+void xqc_test_wlb_new_path_gets_warmup_floor(void);
+void xqc_test_wlb_steady_path_gets_exploration_floor(void);
+void xqc_test_wlb_active_time_ends_warmup(void);
+void xqc_test_wlb_idle_time_does_not_end_warmup(void);
+void xqc_test_wlb_latency_policy_uses_minrtt(void);
+void xqc_test_wlb_path_stats_snapshot(void);
+void xqc_test_wlb_pinned_flow_refreshes_delivery_sample(void);
+void xqc_test_wlb_warmup_time_only_credits_selected_path(void);
+void xqc_test_wlb_throughput_policy_resets_delivery_learning(void);
+void xqc_test_wlb_topology_refresh_clears_packet_deficit(void);
+void xqc_test_wlb_topology_refresh_clears_pin_deficit(void);
+void xqc_test_wlb_ewma_uses_exact_seven_eighths_history(void);
+void xqc_test_wlb_loss_above_two_percent_downweights_path(void);
+void xqc_test_wlb_public_scid_policy_and_truncated_stats(void);
 
 #endif /* XQC_WLB_TEST_H_INCLUDED */
