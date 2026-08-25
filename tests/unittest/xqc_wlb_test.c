@@ -864,14 +864,14 @@ xqc_test_wlb_evicted_path_gets_recovery_probe(void)
      * permanent. One probe per interval breaks that deadlock. */
     /* First payload packet arms the probe interval; it must never itself
      * be a probe. */
-    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 0);
+    CU_ASSERT_EQUAL(wlb_test_invoke(&f, UINT32_MAX), 0);
 
     int probes = 0;
     int healthy = 0;
     for (int round = 0; round < 4; round++) {
         wlb_test_clock_advance(600000); /* past the 500ms probe interval */
         for (int i = 0; i < 8; i++) {
-            uint64_t selected = wlb_test_invoke_stream(&f);
+            uint64_t selected = wlb_test_invoke(&f, UINT32_MAX);
             if (selected == 1) {
                 probes++;
             } else if (selected == 0) {
@@ -891,6 +891,26 @@ xqc_test_wlb_evicted_path_gets_recovery_probe(void)
         }
     }
     CU_ASSERT_TRUE(on_relay > 1); /* real share again, not just probes */
+
+    wlb_test_teardown(&f);
+}
+
+void
+xqc_test_wlb_evicted_probe_never_carries_unique_stream_data(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    xqc_path_ctx_t *relay = wlb_test_add_path(&f, 1, 25000, 64 * 1024, 0);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(relay);
+    relay->path_send_ctl->ctl_pto_count = 3;
+
+    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 0); /* arm interval */
+    for (int i = 0; i < 4; i++) {
+        wlb_test_clock_advance(600000);
+        CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 0);
+    }
 
     wlb_test_teardown(&f);
 }

@@ -1120,11 +1120,12 @@ xqc_wlb_scheduler_get_path(void *scheduler,
 
     uint64_t now_us = xqc_monotonic_timestamp();
 
-    /* Recovery probe for evicted paths — see wlb_pick_evicted_probe. Runs
-     * only for payload (control and Low Latency returned above), at most
-     * one packet per interval, and does not touch WRR state: the probed
-     * path is not in the weight table until its PTO count clears. */
-    {
+    /* Recovery probe for evicted paths — see wlb_pick_evicted_probe. Only an
+     * unreliable DATAGRAM may be used here. Sending a unique reliable STREAM
+     * packet down a known-blackholed path creates a receive-ordering hole;
+     * the healthy paths can then deliver thousands of later frames behind it
+     * and exhaust the peer's reassembly-node budget. */
+    if (packet_out->po_frame_types & XQC_FRAME_BIT_DATAGRAM) {
         xqc_path_ctx_t *probe =
             wlb_pick_evicted_probe(s, conn, packet_out, check_cwnd, now_us);
         if (probe) {
