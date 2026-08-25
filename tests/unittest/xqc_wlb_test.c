@@ -695,6 +695,49 @@ xqc_test_wlb_control_packets_use_minrtt(void)
 }
 
 void
+xqc_test_wlb_blackholed_path_does_not_stall_rounds(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    /* path 0 = the healthy direct link, path 1 = the relay that blackholes. */
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    xqc_path_ctx_t *relay = wlb_test_add_path(&f, 1, 25000, 64 * 1024, 0);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(relay);
+
+    /* Blackholed: still ACTIVE with no socket error, only consecutive PTOs.
+     * This is the LAN-relay failure mode -- the phone stops forwarding while
+     * the path itself looks alive. */
+    /* Mirrors WLB_PTO_EVICT_THRESH, which is private to the scheduler. */
+    relay->path_send_ctl->ctl_pto_count = 3;
+
+    for (int i = 0; i < 32; i++) {
+        uint64_t selected = wlb_test_invoke_stream(&f);
+        CU_ASSERT_EQUAL(selected, 0);
+    }
+
+    /* The relay recovers. It must re-enter scheduling with a fresh quantum,
+     * not with a deficit banked over every round it sat out -- otherwise it
+     * monopolises the link and starves the path that stayed healthy. */
+    relay->path_send_ctl->ctl_pto_count = 0;
+
+    int on_direct = 0;
+    int on_relay = 0;
+    for (int i = 0; i < 32; i++) {
+        uint64_t selected = wlb_test_invoke_stream(&f);
+        if (selected == 0) {
+            on_direct++;
+        } else if (selected == 1) {
+            on_relay++;
+        }
+    }
+    CU_ASSERT_TRUE(on_relay > 0);
+    CU_ASSERT_TRUE(on_direct > 0);
+
+    wlb_test_teardown(&f);
+}
+
+void
 xqc_test_wlb_routine_path_event_preserves_round(void)
 {
     wlb_test_fixture_t baseline;

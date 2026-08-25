@@ -365,6 +365,16 @@ wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
  * A blackholed path can remain ACTIVE without socket error, which otherwise
  * causes WLB to keep selecting it and stall throughput after link-down.
  */
+static xqc_bool_t
+wlb_path_schedulable(xqc_path_ctx_t *path)
+{
+    return path->path_state == XQC_PATH_STATE_ACTIVE
+           && path->app_path_status != XQC_APP_PATH_STATUS_FROZEN
+           && !(path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR)
+           && !(path->path_send_ctl
+                && path->path_send_ctl->ctl_pto_count >= WLB_PTO_EVICT_THRESH);
+}
+
 static xqc_path_ctx_t *
 wlb_find_path_ctx(xqc_connection_t *conn, uint64_t path_id)
 {
@@ -372,13 +382,7 @@ wlb_find_path_ctx(xqc_connection_t *conn, uint64_t path_id)
     xqc_path_ctx_t  *path;
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-        if (path->path_id == path_id
-            && path->path_state == XQC_PATH_STATE_ACTIVE
-            && path->app_path_status != XQC_APP_PATH_STATUS_FROZEN
-            && !(path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR)
-            && !(path->path_send_ctl
-                 && path->path_send_ctl->ctl_pto_count >= WLB_PTO_EVICT_THRESH))
-        {
+        if (path->path_id == path_id && wlb_path_schedulable(path)) {
             return path;
         }
     }
@@ -576,7 +580,7 @@ wlb_compute_weight(xqc_path_ctx_t *path, uint64_t max_rtt_us)
 
 /**
  * Count active, healthy paths using the SAME predicate as wlb_refresh_paths
- * (ACTIVE && !FROZEN && !SOCKET_ERROR). Cheap O(paths) scan used to detect a
+ * (wlb_path_schedulable). Cheap O(paths) scan used to detect a
  * newly-active path promptly, decoupled from the 1/sec wlb_flow_expire
  * throttle. Must match refresh's predicate exactly so the count is directly
  * comparable to s->n_paths (otherwise it would force-refresh every call).
@@ -589,10 +593,7 @@ wlb_count_active_paths(xqc_connection_t *conn)
     xqc_path_ctx_t  *path;
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-        if (path->path_state != XQC_PATH_STATE_ACTIVE
-            || path->app_path_status == XQC_APP_PATH_STATUS_FROZEN
-            || (path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR))
-        {
+        if (!wlb_path_schedulable(path)) {
             continue;
         }
         n++;
@@ -613,10 +614,7 @@ wlb_active_paths_match_cache(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
     xqc_path_ctx_t *path;
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-        if (path->path_state != XQC_PATH_STATE_ACTIVE
-            || path->app_path_status == XQC_APP_PATH_STATUS_FROZEN
-            || (path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR))
-        {
+        if (!wlb_path_schedulable(path)) {
             continue;
         }
         if (n >= s->n_paths || s->paths[n].path_id != path->path_id) {
@@ -655,10 +653,7 @@ wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
     uint64_t max_rtt_us = 0;
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-        if (path->path_state != XQC_PATH_STATE_ACTIVE
-            || path->app_path_status == XQC_APP_PATH_STATUS_FROZEN
-            || (path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR))
-        {
+        if (!wlb_path_schedulable(path)) {
             continue;
         }
         uint64_t srtt = xqc_send_ctl_get_srtt(path->path_send_ctl);
@@ -674,10 +669,7 @@ wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
     int n = 0;
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-        if (path->path_state != XQC_PATH_STATE_ACTIVE
-            || path->app_path_status == XQC_APP_PATH_STATUS_FROZEN
-            || (path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR))
-        {
+        if (!wlb_path_schedulable(path)) {
             continue;
         }
         if (n >= WLB_MAX_PATHS) {
