@@ -108,7 +108,6 @@ typedef struct {
     uint64_t    app_delivered;
     uint64_t    app_delivered_time_us;
     uint64_t    goodput_ewma_Bps;
-    uint64_t    warmup_started_us;
     uint64_t    warmup_acked_bytes;
     uint64_t    warmup_active_us;
     uint64_t    last_payload_schedule_us;
@@ -390,14 +389,31 @@ wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
  * A blackholed path can remain ACTIVE without socket error, which otherwise
  * causes WLB to keep selecting it and stall throughput after link-down.
  */
+/* Transport liveness only: the path exists and its socket works. Says
+ * nothing about whether it is currently delivering. Both the scheduling
+ * predicate and the recovery-probe picker build on this, so a new
+ * disqualifier added here cannot be missed by one of them. */
 static xqc_bool_t
-wlb_path_schedulable(xqc_path_ctx_t *path)
+wlb_path_transport_ok(xqc_path_ctx_t *path)
 {
     return path->path_state == XQC_PATH_STATE_ACTIVE
            && path->app_path_status != XQC_APP_PATH_STATUS_FROZEN
-           && !(path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR)
-           && !(path->path_send_ctl
-                && path->path_send_ctl->ctl_pto_count >= WLB_PTO_EVICT_THRESH);
+           && !(path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR);
+}
+
+/* True once the path has stopped responding for WLB_PTO_EVICT_THRESH
+ * consecutive PTOs — evicted from scheduling, eligible for probing. */
+static xqc_bool_t
+wlb_path_blackholed(xqc_path_ctx_t *path)
+{
+    return path->path_send_ctl != NULL
+           && path->path_send_ctl->ctl_pto_count >= WLB_PTO_EVICT_THRESH;
+}
+
+static xqc_bool_t
+wlb_path_schedulable(xqc_path_ctx_t *path)
+{
+    return wlb_path_transport_ok(path) && !wlb_path_blackholed(path);
 }
 
 static xqc_path_ctx_t *
@@ -625,8 +641,7 @@ wlb_rebuild_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
         memset(&entry, 0, sizeof(entry));
         entry.path_id = path->path_id;
         entry.warmup = XQC_TRUE;
-        entry.warmup_started_us = xqc_monotonic_timestamp();
-        entry.prior_delivered_time_us = entry.warmup_started_us;
+        entry.prior_delivered_time_us = xqc_monotonic_timestamp();
         for (int j = 0; j < old_n; j++) {
             if (old[j].path_id == path->path_id) {
                 entry = old[j];
@@ -892,7 +907,6 @@ xqc_wlb_scheduler_set_policy(void *scheduler, xqc_connection_t *conn,
         s->paths[i].pin_deficit = 0;
         if (policy == XQC_WLB_MAX_THROUGHPUT) {
             s->paths[i].warmup = XQC_TRUE;
-            s->paths[i].warmup_started_us = xqc_monotonic_timestamp();
             s->paths[i].warmup_acked_bytes = 0;
             s->paths[i].warmup_active_us = 0;
             s->paths[i].last_payload_schedule_us = 0;
@@ -989,12 +1003,7 @@ wlb_pick_evicted_probe(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
     int n = 0;
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-        if (path->path_state != XQC_PATH_STATE_ACTIVE
-            || path->app_path_status == XQC_APP_PATH_STATUS_FROZEN
-            || (path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR)
-            || !(path->path_send_ctl
-                 && path->path_send_ctl->ctl_pto_count >= WLB_PTO_EVICT_THRESH))
-        {
+        if (!wlb_path_transport_ok(path) || !wlb_path_blackholed(path)) {
             continue;
         }
         if (n < WLB_MAX_PATHS) {
