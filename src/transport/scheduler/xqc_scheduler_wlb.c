@@ -1107,8 +1107,9 @@ static void
 xqc_wlb_scheduler_handle_path_event(void *scheduler,
     xqc_path_ctx_t *path, xqc_scheduler_path_event_t event, void *event_arg)
 {
-    xqc_wlb_scheduler_t *s = (xqc_wlb_scheduler_t *)scheduler;
-    s->force_refresh_paths = 1;
+    /* Weights are recomputed at round boundaries. PATH_NOT_FULL is emitted
+     * for routine send batches, so treating it as a topology change would
+     * continually reset deficits and make ratios batch-size dependent. */
 }
 
 static void
