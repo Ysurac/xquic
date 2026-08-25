@@ -847,6 +847,55 @@ xqc_test_wlb_control_packets_use_minrtt(void)
 }
 
 void
+xqc_test_wlb_evicted_path_gets_recovery_probe(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    xqc_path_ctx_t *relay = wlb_test_add_path(&f, 1, 25000, 64 * 1024, 0);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(relay);
+
+    /* Evict the relay: blackholed but still ACTIVE. */
+    relay->path_send_ctl->ctl_pto_count = 3;
+
+    /* Without probing, an evicted path never carries payload, nothing can
+     * ACK on it, and ctl_pto_count can never reset — eviction would be
+     * permanent. One probe per interval breaks that deadlock. */
+    /* First payload packet arms the probe interval; it must never itself
+     * be a probe. */
+    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 0);
+
+    int probes = 0;
+    int healthy = 0;
+    for (int round = 0; round < 4; round++) {
+        wlb_test_clock_advance(600000); /* past the 500ms probe interval */
+        for (int i = 0; i < 8; i++) {
+            uint64_t selected = wlb_test_invoke_stream(&f);
+            if (selected == 1) {
+                probes++;
+            } else if (selected == 0) {
+                healthy++;
+            }
+        }
+    }
+    CU_ASSERT_EQUAL(probes, 4);      /* exactly one probe per interval */
+    CU_ASSERT_EQUAL(healthy, 28);    /* everything else stays on the live path */
+
+    /* The probe got through: the path heals and re-enters scheduling. */
+    relay->path_send_ctl->ctl_pto_count = 0;
+    int on_relay = 0;
+    for (int i = 0; i < 32; i++) {
+        if (wlb_test_invoke_stream(&f) == 1) {
+            on_relay++;
+        }
+    }
+    CU_ASSERT_TRUE(on_relay > 1); /* real share again, not just probes */
+
+    wlb_test_teardown(&f);
+}
+
+void
 xqc_test_wlb_blackholed_path_does_not_stall_rounds(void)
 {
     wlb_test_fixture_t f;

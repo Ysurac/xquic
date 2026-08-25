@@ -68,6 +68,14 @@
 #define WLB_WARMUP_FLOOR_PCT  20
 #define WLB_STEADY_FLOOR_PCT  5
 #define WLB_QUANTUM_TOTAL      100
+/* An evicted (repeated-PTO) path receives no payload, so nothing can ever
+ * ACK on it and ctl_pto_count can never reset: eviction would be permanent
+ * even after the link heals. Send one real payload packet per interval as a
+ * probe; a surviving probe's ACK clears the PTO count and the path re-enters
+ * scheduling through a fresh warm-up. One datagram per half-second on a dead
+ * path is a negligible loss (inner TCP retransmits; datagrams are best-
+ * effort by contract). */
+#define WLB_EVICTED_PROBE_INTERVAL_US (500ULL * 1000)
 
 /*
  * Tombstone marker for deleted flow table entries.
@@ -121,6 +129,8 @@ typedef struct {
     uint64_t             recovery_unpin_until_us; /* temporarily disable TCP pinning after recovery */
     uint64_t             recovery_prefer_path_id; /* newly recovered path to prefer for first re-pin */
     xqc_wlb_policy_t     policy;
+    uint64_t             last_evicted_probe_us;
+    uint64_t             next_evicted_probe_path; /* round-robin cursor */
     /* Set once a previously-healthy path has been observed as unhealthy. Gates
      * the "newly appeared path = recovery" heuristic so the heuristic does not
      * fire during initial multi-path setup (e.g. secondary path coming up
@@ -937,6 +947,66 @@ xqc_wlb_scheduler_copy_path_stats(void *scheduler, xqc_wlb_path_stats_t *out,
 /* Sentinel: per-packet WRR without flow pinning (UDP/QUIC datagrams) */
 #define WLB_FLOW_HASH_UNPINNED  0xFFFFFFFFU
 
+/* Pick an ACTIVE-but-evicted path for a single probe payload packet, at
+ * most once per WLB_EVICTED_PROBE_INTERVAL_US across the connection.
+ * Round-robins across multiple evicted paths so one permanently dead path
+ * cannot starve another's recovery probe. Returns NULL when there is
+ * nothing to probe, the interval has not elapsed, or the packet does not
+ * fit the path's cwnd. */
+static xqc_path_ctx_t *
+wlb_pick_evicted_probe(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
+                       xqc_packet_out_t *packet_out, int check_cwnd,
+                       uint64_t now_us)
+{
+    if (s->last_evicted_probe_us == 0) {
+        /* Arm the interval on first sight rather than probing immediately:
+         * a path evicted at connection start still gets its probe one full
+         * interval later, and a monotonic clock with an arbitrary epoch
+         * cannot make the first payload packet a probe. */
+        s->last_evicted_probe_us = now_us;
+        return NULL;
+    }
+    if (now_us - s->last_evicted_probe_us < WLB_EVICTED_PROBE_INTERVAL_US) {
+        return NULL;
+    }
+
+    xqc_list_head_t *pos, *next;
+    xqc_path_ctx_t  *path;
+    xqc_path_ctx_t  *candidates[WLB_MAX_PATHS];
+    int n = 0;
+    xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
+        path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
+        if (path->path_state != XQC_PATH_STATE_ACTIVE
+            || path->app_path_status == XQC_APP_PATH_STATUS_FROZEN
+            || (path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR)
+            || !(path->path_send_ctl
+                 && path->path_send_ctl->ctl_pto_count >= WLB_PTO_EVICT_THRESH))
+        {
+            continue;
+        }
+        if (n < WLB_MAX_PATHS) {
+            candidates[n++] = path;
+        }
+    }
+    if (n == 0) {
+        return NULL;
+    }
+
+    xqc_path_ctx_t *probe =
+        candidates[(size_t)(s->next_evicted_probe_path % (uint64_t)n)];
+    if (check_cwnd
+        && !xqc_scheduler_check_path_can_send(probe, packet_out, check_cwnd))
+    {
+        return NULL;
+    }
+    s->next_evicted_probe_path++;
+    s->last_evicted_probe_us = now_us;
+    xqc_log(s->log, XQC_LOG_INFO,
+            "|wlb|evicted_probe|path:%ui|pto:%ud|",
+            probe->path_id, probe->path_send_ctl->ctl_pto_count);
+    return probe;
+}
+
 /**
  * Main scheduling entry point.
  *
@@ -985,6 +1055,18 @@ xqc_wlb_scheduler_get_path(void *scheduler,
         (!stream_data && packet_out->po_flow_hash != WLB_FLOW_HASH_UNPINNED);
 
     uint64_t now_us = xqc_monotonic_timestamp();
+
+    /* Recovery probe for evicted paths — see wlb_pick_evicted_probe. Runs
+     * only for payload (control and Low Latency returned above), at most
+     * one packet per interval, and does not touch WRR state: the probed
+     * path is not in the weight table until its PTO count clears. */
+    {
+        xqc_path_ctx_t *probe =
+            wlb_pick_evicted_probe(s, conn, packet_out, check_cwnd, now_us);
+        if (probe) {
+            return probe;
+        }
+    }
 
     /* After path recovery, allow a brief per-packet WRR phase so existing TCP
      * flows don't immediately re-pin to the surviving path before the restored

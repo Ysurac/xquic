@@ -65,6 +65,7 @@ void xqc_test_wlb_stream_data_distributes(void);
 void xqc_test_wlb_stream_data_weights_asymmetric_paths(void);
 void xqc_test_wlb_stream_path_replacement_refreshes_cache(void);
 void xqc_test_wlb_control_packets_use_minrtt(void);
+void xqc_test_wlb_evicted_path_gets_recovery_probe(void);
 void xqc_test_wlb_blackholed_path_does_not_stall_rounds(void);
 void xqc_test_wlb_unpinned_blackhole_refreshes_topology(void);
 void xqc_test_wlb_routine_path_event_preserves_round(void);
