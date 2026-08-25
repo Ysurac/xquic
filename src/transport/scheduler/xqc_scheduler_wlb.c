@@ -442,19 +442,32 @@ wlb_compute_goodput_weight(wlb_path_weight_t *entry, xqc_path_ctx_t *path)
     }
 
     uint64_t weight = entry->goodput_ewma_Bps;
-    if (weight == 0) {
+    if (weight > 0) {
+        /* Measured acked goodput is already net of every lost packet, so
+         * loss takes only a gentle linear haircut here — enough to shed
+         * load from a degrading path before the EWMA catches up, without
+         * the old 2/loss divisor that cut a lossy-but-delivering cellular
+         * link to a third of its measured share. */
+        double loss_percent = xqc_path_recent_loss_rate(path);
+        if (loss_percent > 2.0) {
+            if (loss_percent > 90.0) {
+                loss_percent = 90.0;
+            }
+            weight = (uint64_t)((double)weight * (100.0 - loss_percent) / 100.0);
+        }
+    } else {
+        /* Bootstrap: the congestion controller's bandwidth estimate has not
+         * paid for its losses yet, so discount it aggressively. */
         weight = xqc_send_ctl_get_est_bw(ctl);
+        if (weight > 0) {
+            double loss_percent = xqc_path_recent_loss_rate(path);
+            if (loss_percent > 2.0) {
+                weight = (uint64_t)((double)weight * 2.0 / loss_percent);
+            }
+        }
     }
     if (weight == 0) {
         weight = 1;
-    }
-
-    double loss_percent = xqc_path_recent_loss_rate(path);
-    if (loss_percent > 2.0) {
-        weight = (uint64_t)((double)weight * 2.0 / loss_percent);
-        if (weight == 0) {
-            weight = 1;
-        }
     }
 
     return weight;

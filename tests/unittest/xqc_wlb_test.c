@@ -1010,6 +1010,33 @@ xqc_test_wlb_routine_path_event_preserves_round(void)
 }
 
 void
+xqc_test_wlb_measured_goodput_ignores_loss_penalty(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    xqc_path_ctx_t *lossy = wlb_test_add_path(&f, 1, 25000, 64 * 1024, 0);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(lossy);
+    wlb_test_drain_initial_round(&f);
+
+    /* Equal ACKNOWLEDGED delivery on both paths; path 1 additionally shows
+     * 6% recent loss (cellular always carries a few percent). Acked goodput
+     * is already net of that loss — penalizing it again would starve a
+     * lossy-but-delivering link to a third of its measured share. */
+    wlb_test_clock_advance(1000000);
+    wlb_test_record_delivery(&f, 0, 1024 * 1024);
+    wlb_test_record_delivery(&f, 1, 1024 * 1024);
+    lossy->path_send_ctl->ctl_recent_send_count[0] = 100;
+    lossy->path_send_ctl->ctl_recent_lost_count[0] = 6;
+
+    int path0_count = wlb_test_count_stream_path(&f, 0, 100);
+    CU_ASSERT_TRUE(path0_count >= 45 && path0_count <= 55);
+
+    wlb_test_teardown(&f);
+}
+
+void
 xqc_test_wlb_equal_goodput_is_balanced(void)
 {
     wlb_test_fixture_t f;
@@ -1386,14 +1413,18 @@ xqc_test_wlb_loss_above_two_percent_downweights_path(void)
     wlb_test_add_path(&f, 1, 25000, 64 * 1024, 0);
     wlb_test_drain_initial_round(&f);
 
+    /* Heavy loss must still visibly shed load even when acked goodput is
+     * equal: the gentle (100-loss)% haircut on measured goodput covers a
+     * degrading path before the EWMA reflects it. Mild loss (see
+     * measured_goodput_ignores_loss_penalty) must NOT be punished twice. */
     f.send_ctls[1].ctl_recent_send_count[0] = 100;
-    f.send_ctls[1].ctl_recent_lost_count[0] = 3;
+    f.send_ctls[1].ctl_recent_lost_count[0] = 30;
     wlb_test_clock_advance(1000000);
     wlb_test_record_delivery(&f, 0, 8 * 1024 * 1024);
     wlb_test_record_delivery(&f, 1, 8 * 1024 * 1024);
 
     int path0_count = wlb_test_count_stream_path(&f, 0, 100);
-    CU_ASSERT_EQUAL(path0_count, 60);
+    CU_ASSERT_TRUE(path0_count >= 55 && path0_count <= 65);
 
     wlb_test_teardown(&f);
 }

@@ -69,6 +69,7 @@ void xqc_test_wlb_evicted_path_gets_recovery_probe(void);
 void xqc_test_wlb_blackholed_path_does_not_stall_rounds(void);
 void xqc_test_wlb_unpinned_blackhole_refreshes_topology(void);
 void xqc_test_wlb_routine_path_event_preserves_round(void);
+void xqc_test_wlb_measured_goodput_ignores_loss_penalty(void);
 void xqc_test_wlb_equal_goodput_is_balanced(void);
 void xqc_test_wlb_four_to_one_goodput_after_acked_warmup(void);
 void xqc_test_wlb_new_path_gets_warmup_floor(void);
