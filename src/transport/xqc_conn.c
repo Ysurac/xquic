@@ -3764,6 +3764,7 @@ xqc_conn_get_wlb_path_stats(xqc_engine_t *engine, const xqc_cid_t *scid,
         return -XQC_EPARAM;
     }
 
+    xqc_wlb_scheduler_sync_path_stats(conn->scheduler, conn);
     return xqc_wlb_scheduler_copy_path_stats(conn->scheduler, out, capacity,
                                              out_count);
 }
@@ -7122,32 +7123,6 @@ xqc_conn_get_queue_fin_timeout(xqc_connection_t *conn)
     return conn->conn_settings.fec_conn_queue_rpr_timeout;
 }
 
-static uint64_t
-xqc_conn_wlb_app_payload_bytes(xqc_packet_out_t *packet_out)
-{
-    uint64_t payload_bytes = 0;
-
-    if (packet_out->po_frame_types & XQC_FRAME_BIT_DATAGRAM) {
-        payload_bytes = packet_out->po_dgram_payload_size;
-    }
-
-    if (packet_out->po_frame_types & XQC_FRAME_BIT_STREAM) {
-        for (int i = 0; i < XQC_MAX_STREAM_FRAME_IN_PO; i++) {
-            if (packet_out->po_stream_frames[i].ps_is_used == 0) {
-                break;
-            }
-            uint64_t stream_bytes =
-                packet_out->po_stream_frames[i].ps_length;
-            if (UINT64_MAX - payload_bytes < stream_bytes) {
-                return UINT64_MAX;
-            }
-            payload_bytes += stream_bytes;
-        }
-    }
-
-    return payload_bytes;
-}
-
 void
 xqc_conn_decrease_unacked_stream_ref(xqc_connection_t *conn,
                                       xqc_packet_out_t *packet_out)
@@ -7155,16 +7130,6 @@ xqc_conn_decrease_unacked_stream_ref(xqc_connection_t *conn,
     int first_time_ack = !packet_out->po_acked;
     if (packet_out->po_origin) {
         first_time_ack = first_time_ack && !packet_out->po_origin->po_acked;
-    }
-
-    if (first_time_ack
-        && xqc_wlb_scheduler_is_callback(conn->scheduler_callback))
-    {
-        uint64_t payload_bytes =
-            xqc_conn_wlb_app_payload_bytes(packet_out);
-        xqc_wlb_scheduler_on_app_packet_acked(
-            conn->scheduler, packet_out->po_path_id, payload_bytes,
-            xqc_monotonic_timestamp());
     }
 
     if (packet_out->po_flag & XQC_POF_STREAM_UNACK) {

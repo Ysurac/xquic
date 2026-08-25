@@ -22,6 +22,8 @@ int xqc_wlb_scheduler_copy_path_stats(void *scheduler, xqc_wlb_path_stats_t *out
 void xqc_wlb_scheduler_on_app_packet_acked(void *scheduler, uint64_t path_id,
                                           uint64_t payload_bytes,
                                           uint64_t ack_time_us);
+void xqc_wlb_scheduler_sync_path_stats(void *scheduler,
+                                       xqc_connection_t *conn);
 xqc_bool_t xqc_wlb_scheduler_is_callback(
     const xqc_scheduler_callback_t *scheduler_callback);
 

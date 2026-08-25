@@ -88,5 +88,7 @@ void xqc_test_wlb_control_delivery_does_not_advance_learning(void);
 void xqc_test_wlb_application_delivery_advances_learning(void);
 void xqc_test_wlb_latency_policy_populates_stats_before_payload(void);
 void xqc_test_wlb_latency_policy_syncs_path_add_remove(void);
+void xqc_test_wlb_rejected_0rtt_does_not_advance_learning(void);
+void xqc_test_wlb_duplicate_ack_counts_application_once(void);
 
 #endif /* XQC_WLB_TEST_H_INCLUDED */

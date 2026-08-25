@@ -644,6 +644,23 @@ wlb_sync_paths_for_status(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
     wlb_rebuild_paths(s, conn, XQC_FALSE);
 }
 
+void
+xqc_wlb_scheduler_sync_path_stats(void *scheduler, xqc_connection_t *conn)
+{
+    if (scheduler == NULL || conn == NULL) {
+        return;
+    }
+
+    xqc_wlb_scheduler_t *s = scheduler;
+    if (s->policy == XQC_WLB_LOW_LATENCY
+        && (s->force_refresh_paths
+            || !wlb_active_paths_match_cache(s, conn)))
+    {
+        wlb_sync_paths_for_status(s, conn);
+        s->force_refresh_paths = 0;
+    }
+}
+
 /**
  * Check if all paths have exhausted their deficit (round complete).
  */
@@ -862,6 +879,7 @@ xqc_wlb_scheduler_set_policy(void *scheduler, xqc_connection_t *conn,
                 xqc_monotonic_timestamp();
         }
     }
+    xqc_wlb_scheduler_sync_path_stats(scheduler, conn);
     return XQC_OK;
 }
 
@@ -935,12 +953,7 @@ xqc_wlb_scheduler_get_path(void *scheduler,
     xqc_wlb_scheduler_t *s = (xqc_wlb_scheduler_t *)scheduler;
 
     if (s->policy == XQC_WLB_LOW_LATENCY) {
-        if (s->force_refresh_paths
-            || !wlb_active_paths_match_cache(s, conn))
-        {
-            wlb_sync_paths_for_status(s, conn);
-            s->force_refresh_paths = 0;
-        }
+        xqc_wlb_scheduler_sync_path_stats(scheduler, conn);
         return wlb_minrtt_fallback(conn, packet_out, check_cwnd, reinject,
                                    cc_blocked);
     }

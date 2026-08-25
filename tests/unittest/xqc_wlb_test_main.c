@@ -100,7 +100,11 @@ main(void)
         || NULL == CU_add_test(s, "latency_policy_populates_stats_before_payload",
                                xqc_test_wlb_latency_policy_populates_stats_before_payload)
         || NULL == CU_add_test(s, "latency_policy_syncs_path_add_remove",
-                               xqc_test_wlb_latency_policy_syncs_path_add_remove))
+                               xqc_test_wlb_latency_policy_syncs_path_add_remove)
+        || NULL == CU_add_test(s, "rejected_0rtt_does_not_advance_learning",
+                               xqc_test_wlb_rejected_0rtt_does_not_advance_learning)
+        || NULL == CU_add_test(s, "duplicate_ack_counts_application_once",
+                               xqc_test_wlb_duplicate_ack_counts_application_once))
     {
         CU_cleanup_registry();
         return (int)CU_get_error();

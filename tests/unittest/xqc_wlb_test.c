@@ -335,7 +335,8 @@ wlb_test_record_acked_packet(wlb_test_fixture_t *f, int path_index,
         po.po_stream_frames[0].ps_length =
             (unsigned int)app_payload_bytes;
     }
-    xqc_conn_decrease_unacked_stream_ref(&f->conn, &po);
+    xqc_send_ctl_on_packet_acked(&f->send_ctls[path_index], &po,
+                                 g_fake_now_us, 1);
 }
 
 static void
@@ -380,7 +381,8 @@ wlb_test_record_generated_datagram_delivery(wlb_test_fixture_t *f,
         po->po_path_id = f->paths[path_index].path_id;
         f->send_ctls[path_index].ctl_delivered += po->po_used_size;
         f->send_ctls[path_index].ctl_delivered_time = g_fake_now_us;
-        xqc_conn_decrease_unacked_stream_ref(&f->conn, po);
+        xqc_send_ctl_on_packet_acked(&f->send_ctls[path_index], po,
+                                     g_fake_now_us, 1);
         xqc_packet_out_destroy(po);
     }
 }
@@ -1449,18 +1451,18 @@ xqc_test_wlb_latency_policy_populates_stats_before_payload(void)
 {
     wlb_test_fixture_t f;
     wlb_test_setup(&f);
+    wlb_test_register_scid(&f);
 
     wlb_test_add_path(&f, 0, 50000, 64 * 1024, 0);
     wlb_test_add_path(&f, 1, 10000, 64 * 1024, 0);
-    CU_ASSERT_EQUAL(xqc_wlb_scheduler_set_policy(
-                        f.scheduler, &f.conn, XQC_WLB_LOW_LATENCY),
+    CU_ASSERT_EQUAL(xqc_conn_set_wlb_policy(
+                        &f.engine, &f.scid, XQC_WLB_LOW_LATENCY),
                     XQC_OK);
-    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 1);
 
     xqc_wlb_path_stats_t stats[2];
     size_t n = 0;
-    CU_ASSERT_EQUAL(xqc_wlb_scheduler_copy_path_stats(
-                        f.scheduler, stats, 2, &n),
+    CU_ASSERT_EQUAL(xqc_conn_get_wlb_path_stats(
+                        &f.engine, &f.scid, stats, 2, &n),
                     XQC_OK);
     CU_ASSERT_EQUAL(n, 2);
     if (n == 2) {
@@ -1471,6 +1473,7 @@ xqc_test_wlb_latency_policy_populates_stats_before_payload(void)
         CU_ASSERT_EQUAL(stats[0].goodput_Bps, 0);
         CU_ASSERT_EQUAL(stats[1].goodput_Bps, 0);
     }
+    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 1);
 
     wlb_test_teardown(&f);
 }
@@ -1480,25 +1483,24 @@ xqc_test_wlb_latency_policy_syncs_path_add_remove(void)
 {
     wlb_test_fixture_t f;
     wlb_test_setup(&f);
+    wlb_test_register_scid(&f);
 
     wlb_test_add_path(&f, 0, 50000, 64 * 1024, 0);
     xqc_path_ctx_t *old_path =
         wlb_test_add_path(&f, 1, 10000, 64 * 1024, 0);
-    CU_ASSERT_EQUAL(xqc_wlb_scheduler_set_policy(
-                        f.scheduler, &f.conn, XQC_WLB_LOW_LATENCY),
+    CU_ASSERT_EQUAL(xqc_conn_set_wlb_policy(
+                        &f.engine, &f.scid, XQC_WLB_LOW_LATENCY),
                     XQC_OK);
-    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 1);
 
     wlb_test_clock_advance(1000000);
     wlb_test_record_delivery(&f, 0, 2 * 1024 * 1024);
     wlb_test_detach_path(old_path);
     wlb_test_add_path(&f, 2, 5000, 64 * 1024, 0);
-    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 2);
 
     xqc_wlb_path_stats_t stats[2];
     size_t n = 0;
-    CU_ASSERT_EQUAL(xqc_wlb_scheduler_copy_path_stats(
-                        f.scheduler, stats, 2, &n),
+    CU_ASSERT_EQUAL(xqc_conn_get_wlb_path_stats(
+                        &f.engine, &f.scid, stats, 2, &n),
                     XQC_OK);
     CU_ASSERT_EQUAL(n, 2);
     if (n == 2) {
@@ -1507,6 +1509,73 @@ xqc_test_wlb_latency_policy_syncs_path_add_remove(void)
         CU_ASSERT_EQUAL(stats[0].goodput_Bps, 0);
         CU_ASSERT_EQUAL(stats[0].warmup, 1);
     }
+    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 2);
+
+    wlb_test_teardown(&f);
+}
+
+void
+xqc_test_wlb_rejected_0rtt_does_not_advance_learning(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    wlb_test_add_path(&f, 1, 25000, 64 * 1024, 0);
+    wlb_test_drain_initial_round(&f);
+
+    wlb_test_clock_advance(1000000);
+    xqc_packet_out_t rejected;
+    memset(&rejected, 0, sizeof(rejected));
+    rejected.po_pkt.pkt_type = XQC_PTYPE_0RTT;
+    rejected.po_frame_types = XQC_FRAME_BIT_DATAGRAM;
+    rejected.po_path_id = 0;
+    rejected.po_dgram_payload_size = 2 * 1024 * 1024;
+    xqc_conn_decrease_unacked_stream_ref(&f.conn, &rejected);
+    (void)wlb_test_invoke_stream(&f);
+
+    xqc_wlb_path_stats_t stats[2];
+    size_t n = 0;
+    CU_ASSERT_EQUAL(xqc_wlb_scheduler_copy_path_stats(
+                        f.scheduler, stats, 2, &n),
+                    XQC_OK);
+    CU_ASSERT_EQUAL(n, 2);
+    CU_ASSERT_EQUAL(stats[0].goodput_Bps, 0);
+    CU_ASSERT_EQUAL(stats[0].warmup, 1);
+
+    wlb_test_teardown(&f);
+}
+
+void
+xqc_test_wlb_duplicate_ack_counts_application_once(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    wlb_test_add_path(&f, 1, 25000, 64 * 1024, 0);
+    wlb_test_drain_initial_round(&f);
+
+    wlb_test_clock_advance(1000000);
+    xqc_packet_out_t acked;
+    memset(&acked, 0, sizeof(acked));
+    acked.po_frame_types = XQC_FRAME_BIT_DATAGRAM;
+    acked.po_path_id = 0;
+    acked.po_dgram_payload_size = 8 * 1024 * 1024;
+    xqc_send_ctl_on_packet_acked(&f.send_ctls[0], &acked,
+                                 g_fake_now_us, 1);
+    xqc_send_ctl_on_packet_acked(&f.send_ctls[0], &acked,
+                                 g_fake_now_us, 1);
+    (void)wlb_test_invoke_stream(&f);
+
+    xqc_wlb_path_stats_t stats[2];
+    size_t n = 0;
+    CU_ASSERT_EQUAL(xqc_wlb_scheduler_copy_path_stats(
+                        f.scheduler, stats, 2, &n),
+                    XQC_OK);
+    CU_ASSERT_EQUAL(n, 2);
+    CU_ASSERT_EQUAL(stats[0].goodput_Bps, 1024 * 1024);
+    CU_ASSERT_EQUAL(stats[0].warmup, 0);
 
     wlb_test_teardown(&f);
 }
