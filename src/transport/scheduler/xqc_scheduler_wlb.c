@@ -601,6 +601,33 @@ wlb_count_active_paths(xqc_connection_t *conn)
 }
 
 /**
+ * Compare the cached WRR path IDs with the active connection path list.
+ * Refresh builds the cache in connection-list order, so an ordered comparison
+ * detects both count changes and constant-count path replacement in O(paths).
+ */
+static xqc_bool_t
+wlb_active_paths_match_cache(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
+{
+    int n = 0;
+    xqc_list_head_t *pos, *next;
+    xqc_path_ctx_t *path;
+    xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
+        path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
+        if (path->path_state != XQC_PATH_STATE_ACTIVE
+            || path->app_path_status == XQC_APP_PATH_STATUS_FROZEN
+            || (path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR))
+        {
+            continue;
+        }
+        if (n >= s->n_paths || s->paths[n].path_id != path->path_id) {
+            return XQC_FALSE;
+        }
+        n++;
+    }
+    return n == s->n_paths ? XQC_TRUE : XQC_FALSE;
+}
+
+/**
  * Refresh path list and LATE weights from real-time metrics.
  * Deficit counters are preserved for paths that already existed (by path_id).
  */
@@ -1011,9 +1038,8 @@ xqc_wlb_scheduler_get_path(void *scheduler,
      * flows that miss the pinned fast path, so steady-state pinned traffic
      * pays nothing. We force a refresh only on an INCREASE — path losses are
      * already handled by wlb_flow_expire's failover logic. */
-    int active_path_count = wlb_count_active_paths(conn);
-    if (active_path_count > s->n_paths
-        || (stream_data && active_path_count != s->n_paths))
+    if ((stream_data && !wlb_active_paths_match_cache(s, conn))
+        || (!stream_data && wlb_count_active_paths(conn) > s->n_paths))
     {
         s->force_refresh_paths = 1;
     }

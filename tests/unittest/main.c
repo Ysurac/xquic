@@ -389,6 +389,10 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_wlb_new_path_detected_without_expire_throttle", xqc_test_wlb_new_path_detected_without_expire_throttle)
         || !CU_add_test(pSuite, "xqc_test_wlb_reinject_bypasses_pin", xqc_test_wlb_reinject_bypasses_pin)
         || !CU_add_test(pSuite, "xqc_test_wlb_stream_data_distributes", xqc_test_wlb_stream_data_distributes)
+        || !CU_add_test(pSuite, "xqc_test_wlb_stream_data_weights_asymmetric_paths", xqc_test_wlb_stream_data_weights_asymmetric_paths)
+        || !CU_add_test(pSuite, "xqc_test_wlb_stream_path_replacement_refreshes_cache", xqc_test_wlb_stream_path_replacement_refreshes_cache)
+        || !CU_add_test(pSuite, "xqc_test_wlb_control_packets_use_minrtt", xqc_test_wlb_control_packets_use_minrtt)
+        || !CU_add_test(pSuite, "xqc_test_wlb_routine_path_event_preserves_round", xqc_test_wlb_routine_path_event_preserves_round)
         /* ADD TESTS HERE */)
     {
         CU_cleanup_registry();

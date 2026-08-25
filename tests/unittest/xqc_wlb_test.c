@@ -235,6 +235,19 @@ wlb_test_invoke_stream(wlb_test_fixture_t *f)
     return p ? p->path_id : UINT64_MAX;
 }
 
+static uint64_t
+wlb_test_invoke_control(wlb_test_fixture_t *f)
+{
+    xqc_packet_out_t po;
+    wlb_test_make_packet_out(&po, 0);
+    po.po_frame_types = XQC_FRAME_BIT_ACK;
+    xqc_bool_t cc_blk = XQC_FALSE;
+    xqc_path_ctx_t *p = xqc_wlb_scheduler_cb.xqc_scheduler_get_path(
+        f->scheduler, &f->conn, &po,
+        /* check_cwnd */ 1, /* reinject */ 0, &cc_blk);
+    return p ? p->path_id : UINT64_MAX;
+}
+
 /* ───────────────────────── tests ───────────────────────── */
 
 /* I1: asymmetric paths, single TCP flow → pin lands on wide path.
@@ -611,4 +624,103 @@ xqc_test_wlb_stream_data_distributes(void)
     CU_ASSERT_TRUE(on_path1 > 0);
 
     wlb_test_teardown(&f);
+}
+
+void
+xqc_test_wlb_stream_data_weights_asymmetric_paths(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    wlb_test_add_path(&f, 1, 25000, 16 * 1024, 0);
+
+    int on_wide = 0;
+    int on_narrow = 0;
+    for (int i = 0; i < 20; i++) {
+        uint64_t selected = wlb_test_invoke_stream(&f);
+        if (selected == 0) {
+            on_wide++;
+        } else if (selected == 1) {
+            on_narrow++;
+        }
+    }
+
+    CU_ASSERT_TRUE(on_wide > on_narrow);
+    CU_ASSERT_TRUE(on_narrow > 0);
+
+    wlb_test_teardown(&f);
+}
+
+void
+xqc_test_wlb_stream_path_replacement_refreshes_cache(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    xqc_path_ctx_t *old_relay =
+        wlb_test_add_path(&f, 1, 25000, 64 * 1024, 0);
+
+    (void)wlb_test_invoke_stream(&f);
+    (void)wlb_test_invoke_stream(&f);
+
+    wlb_test_detach_path(old_relay);
+    wlb_test_add_path(&f, 2, 25000, 64 * 1024, 0);
+
+    int saw_replacement = 0;
+    for (int i = 0; i < 8; i++) {
+        if (wlb_test_invoke_stream(&f) == 2) {
+            saw_replacement = 1;
+        }
+    }
+    CU_ASSERT_TRUE(saw_replacement);
+
+    wlb_test_teardown(&f);
+}
+
+void
+xqc_test_wlb_control_packets_use_minrtt(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    wlb_test_add_path(&f, 0, 50000, 64 * 1024, 0);
+    wlb_test_add_path(&f, 1, 10000, 64 * 1024, 0);
+
+    CU_ASSERT_EQUAL(wlb_test_invoke_control(&f), 1);
+    CU_ASSERT_EQUAL(wlb_test_invoke_control(&f), 1);
+
+    wlb_test_teardown(&f);
+}
+
+void
+xqc_test_wlb_routine_path_event_preserves_round(void)
+{
+    wlb_test_fixture_t baseline;
+    wlb_test_fixture_t with_events;
+    wlb_test_setup(&baseline);
+    wlb_test_setup(&with_events);
+
+    wlb_test_add_path(&baseline, 0, 25000, 64 * 1024, 0);
+    wlb_test_add_path(&baseline, 1, 25000, 16 * 1024, 0);
+    xqc_path_ctx_t *wide =
+        wlb_test_add_path(&with_events, 0, 25000, 64 * 1024, 0);
+    wlb_test_add_path(&with_events, 1, 25000, 16 * 1024, 0);
+
+    int saw_narrow = 0;
+    for (int i = 0; i < 16; i++) {
+        uint64_t expected = wlb_test_invoke_stream(&baseline);
+        uint64_t selected = wlb_test_invoke_stream(&with_events);
+        CU_ASSERT_EQUAL(selected, expected);
+        if (selected == 1) {
+            saw_narrow = 1;
+        }
+        xqc_wlb_scheduler_cb.xqc_scheduler_handle_path_event(
+            with_events.scheduler, wide, XQC_SCHED_EVENT_PATH_NOT_FULL, NULL);
+    }
+    CU_ASSERT_TRUE(saw_narrow);
+
+    wlb_test_teardown(&with_events);
+    wlb_test_teardown(&baseline);
 }

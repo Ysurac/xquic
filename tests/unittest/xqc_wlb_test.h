@@ -62,5 +62,9 @@ void xqc_test_wlb_reinject_bypasses_pin(void);
  * They must use unpinned weighted scheduling so one inner TCP flow can
  * consume multiple paths; ACK/control-only packets remain on MinRTT. */
 void xqc_test_wlb_stream_data_distributes(void);
+void xqc_test_wlb_stream_data_weights_asymmetric_paths(void);
+void xqc_test_wlb_stream_path_replacement_refreshes_cache(void);
+void xqc_test_wlb_control_packets_use_minrtt(void);
+void xqc_test_wlb_routine_path_event_preserves_round(void);
 
 #endif /* XQC_WLB_TEST_H_INCLUDED */
