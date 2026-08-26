@@ -1037,6 +1037,38 @@ xqc_test_wlb_measured_goodput_ignores_loss_penalty(void)
 }
 
 void
+xqc_test_wlb_idle_path_goodput_decays(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    wlb_test_add_path(&f, 1, 25000, 64 * 1024, 0);
+    wlb_test_drain_initial_round(&f);
+
+    /* Both paths deliver equally, then path 1 goes silent while path 0
+     * keeps delivering. Under ack-to-ack sampling a silent path produced
+     * no sample at all, so its last (possibly burst-inflated) average was
+     * frozen and it kept out-weighting the path doing the actual work. A
+     * wall-clock sampler emits zero-rate samples for the idle span, so the
+     * stale average decays and the working path takes the round. */
+    wlb_test_clock_advance(1000000);
+    wlb_test_record_delivery(&f, 0, 1024 * 1024);
+    wlb_test_record_delivery(&f, 1, 1024 * 1024);
+    (void)wlb_test_count_stream_path(&f, 0, 100); /* absorb one round */
+
+    int path0_count = 0;
+    for (int round = 0; round < 6; round++) {
+        wlb_test_clock_advance(1000000);
+        wlb_test_record_delivery(&f, 0, 1024 * 1024);
+        path0_count = wlb_test_count_stream_path(&f, 0, 100);
+    }
+    CU_ASSERT_TRUE(path0_count >= 80);
+
+    wlb_test_teardown(&f);
+}
+
+void
 xqc_test_wlb_equal_goodput_is_balanced(void)
 {
     wlb_test_fixture_t f;

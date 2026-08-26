@@ -76,6 +76,9 @@
  * path is a negligible loss (inner TCP retransmits; datagrams are best-
  * effort by contract). */
 #define WLB_EVICTED_PROBE_INTERVAL_US (500ULL * 1000)
+/* Minimum wall-clock span for one goodput sample. Sampling faster than this
+ * measures the inside of an ACK burst rather than sustained rate. */
+#define WLB_GOODPUT_SAMPLE_MIN_US (200ULL * 1000)
 
 /*
  * Tombstone marker for deleted flow table entries.
@@ -431,23 +434,32 @@ wlb_find_path_ctx(xqc_connection_t *conn, uint64_t path_id)
 }
 
 static uint64_t
-wlb_compute_goodput_weight(wlb_path_weight_t *entry, xqc_path_ctx_t *path)
+wlb_compute_goodput_weight(wlb_path_weight_t *entry, xqc_path_ctx_t *path,
+                           uint64_t now_us)
 {
     xqc_send_ctl_t *ctl = path->path_send_ctl;
-    if (entry->app_delivered > entry->prior_delivered
-        && entry->app_delivered_time_us > entry->prior_delivered_time_us)
+    /* Sample sustained rate over wall clock, not over the span of the ACKs
+     * themselves. Measuring ack-to-ack timed the inside of a burst: a path
+     * delivering 100 KiB in a 10 ms burst once per second read as 10 MB/s
+     * instead of 100 KB/s, and because a path with no delivery produced no
+     * sample at all, the inflated average never decayed while the path sat
+     * idle. A bursty high-latency link therefore out-weighted links that
+     * were genuinely carrying more, and the aggregate fell below a single
+     * path. Zero-delivery samples are included precisely so idle decays. */
+    if (now_us >= entry->prior_delivered_time_us
+        && now_us - entry->prior_delivered_time_us >= WLB_GOODPUT_SAMPLE_MIN_US)
     {
-        uint64_t delivered =
-            entry->app_delivered - entry->prior_delivered;
-        uint64_t elapsed =
-            entry->app_delivered_time_us - entry->prior_delivered_time_us;
+        uint64_t delivered = entry->app_delivered >= entry->prior_delivered
+                             ? entry->app_delivered - entry->prior_delivered
+                             : 0;
+        uint64_t elapsed = now_us - entry->prior_delivered_time_us;
         uint64_t sample_Bps = (delivered * 1000000) / elapsed;
 
         entry->goodput_ewma_Bps =
             (7 * entry->goodput_ewma_Bps + sample_Bps) / 8;
         entry->warmup_acked_bytes += delivered;
         entry->prior_delivered = entry->app_delivered;
-        entry->prior_delivered_time_us = entry->app_delivered_time_us;
+        entry->prior_delivered_time_us = now_us;
     }
 
     if (entry->warmup
@@ -628,6 +640,7 @@ wlb_rebuild_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
     }
 
     uint64_t raw_weights[WLB_MAX_PATHS];
+    uint64_t now_us = xqc_monotonic_timestamp();
     int n = 0;
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
@@ -653,7 +666,7 @@ wlb_rebuild_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
         s->paths[n] = entry;
         if (sample_delivery) {
             raw_weights[n] =
-                wlb_compute_goodput_weight(&s->paths[n], path);
+                wlb_compute_goodput_weight(&s->paths[n], path, now_us);
         }
         n++;
     }

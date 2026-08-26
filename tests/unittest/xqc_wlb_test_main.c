@@ -65,6 +65,8 @@ main(void)
                                xqc_test_wlb_routine_path_event_preserves_round)
         || NULL == CU_add_test(s, "measured_goodput_ignores_loss_penalty",
                                xqc_test_wlb_measured_goodput_ignores_loss_penalty)
+        || NULL == CU_add_test(s, "idle_path_goodput_decays",
+                               xqc_test_wlb_idle_path_goodput_decays)
         || NULL == CU_add_test(s, "equal_goodput_is_balanced",
                                xqc_test_wlb_equal_goodput_is_balanced)
         || NULL == CU_add_test(s, "four_to_one_goodput_after_acked_warmup",
