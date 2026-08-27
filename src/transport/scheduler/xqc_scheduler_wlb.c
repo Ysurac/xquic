@@ -483,7 +483,7 @@ wlb_compute_goodput_weight(wlb_path_weight_t *entry, xqc_path_ctx_t *path,
             }
             weight = (uint64_t)((double)weight * (100.0 - loss_percent) / 100.0);
         }
-    } else {
+    } else if (entry->warmup) {
         /* Bootstrap: the congestion controller's bandwidth estimate has not
          * paid for its losses yet, so discount it aggressively. */
         weight = xqc_send_ctl_get_est_bw(ctl);
@@ -493,6 +493,14 @@ wlb_compute_goodput_weight(wlb_path_weight_t *entry, xqc_path_ctx_t *path,
                 weight = (uint64_t)((double)weight * 2.0 / loss_percent);
             }
         }
+    } else {
+        /* A warmed path whose measured goodput has decayed to zero delivers
+         * nothing right now; trusting the controller's estimate here hands a
+         * dead path a majority weight it never pays for (observed live: a
+         * 0 B/s path holding 61% while the delivering path got 39%). Send it
+         * to the steady floor, whose probe share is exactly how a recovered
+         * path earns its weight back. */
+        weight = 1;
     }
     if (weight == 0) {
         weight = 1;
