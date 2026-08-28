@@ -67,6 +67,8 @@ main(void)
                                xqc_test_wlb_measured_goodput_ignores_loss_penalty)
         || NULL == CU_add_test(s, "idle_path_goodput_decays",
                                xqc_test_wlb_idle_path_goodput_decays)
+        || NULL == CU_add_test(s, "warmed_zero_goodput_ignores_stale_estimate",
+                               xqc_test_wlb_warmed_zero_goodput_ignores_stale_estimate)
         || NULL == CU_add_test(s, "equal_goodput_is_balanced",
                                xqc_test_wlb_equal_goodput_is_balanced)
         || NULL == CU_add_test(s, "four_to_one_goodput_after_acked_warmup",

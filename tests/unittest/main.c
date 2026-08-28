@@ -393,6 +393,7 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_wlb_stream_path_replacement_refreshes_cache", xqc_test_wlb_stream_path_replacement_refreshes_cache)
         || !CU_add_test(pSuite, "xqc_test_wlb_control_packets_use_minrtt", xqc_test_wlb_control_packets_use_minrtt)
         || !CU_add_test(pSuite, "xqc_test_wlb_routine_path_event_preserves_round", xqc_test_wlb_routine_path_event_preserves_round)
+        || !CU_add_test(pSuite, "xqc_test_wlb_warmed_zero_goodput_ignores_stale_estimate", xqc_test_wlb_warmed_zero_goodput_ignores_stale_estimate)
         /* ADD TESTS HERE */)
     {
         CU_cleanup_registry();

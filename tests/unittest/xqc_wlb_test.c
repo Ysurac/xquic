@@ -1069,6 +1069,40 @@ xqc_test_wlb_idle_path_goodput_decays(void)
 }
 
 void
+xqc_test_wlb_warmed_zero_goodput_ignores_stale_estimate(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    wlb_test_add_path(&f, 1, 25000, 64 * 1024, 0);
+    wlb_test_drain_initial_round(&f);
+
+    /* Warm both paths with real delivery, then leave path 1 silent long
+     * enough for its measured goodput to decay all the way to zero. Keep a
+     * deliberately stale, very large congestion-controller estimate on the
+     * silent path: once warmup is over, that estimate must not override the
+     * measured zero. The steady exploration floor is the only traffic the
+     * path should receive until it delivers again. */
+    f.cong_states[1].bandwidth_Bps = 100 * 1024 * 1024;
+    wlb_test_clock_advance(1000000);
+    wlb_test_record_delivery(&f, 0, 1024 * 1024);
+    wlb_test_record_delivery(&f, 1, 1024 * 1024);
+    (void)wlb_test_count_stream_path(&f, 0, 100);
+
+    for (int round = 0; round < 120; round++) {
+        wlb_test_clock_advance(1000000);
+        wlb_test_record_delivery(&f, 0, 1024 * 1024);
+        (void)wlb_test_count_stream_path(&f, 0, 100);
+    }
+
+    int silent_path_count = wlb_test_count_stream_path(&f, 1, 100);
+    CU_ASSERT_TRUE(silent_path_count >= 5 && silent_path_count <= 6);
+
+    wlb_test_teardown(&f);
+}
+
+void
 xqc_test_wlb_equal_goodput_is_balanced(void)
 {
     wlb_test_fixture_t f;
