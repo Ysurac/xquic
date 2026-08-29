@@ -471,6 +471,27 @@ wlb_compute_goodput_weight(wlb_path_weight_t *entry, xqc_path_ctx_t *path,
 
     uint64_t weight = entry->goodput_ewma_Bps;
     if (weight > 0) {
+        /* Measured goodput is demand-limited, not a capacity reading: a
+         * path only delivers what the scheduler hands it, so a path held
+         * near the floor reports a low rate, which keeps it near the floor.
+         * Observed live: Wi-Fi carried 256 MB against cellular's 4144 MB
+         * over the same eight hours while both showed four healthy flows.
+         *
+         * Credit the congestion controller's bandwidth estimate — a
+         * max-filtered delivery rate, i.e. what the link sustained when it
+         * last had data — but only while the path is application-limited,
+         * which is exactly the under-fed case: it ran out of packets to
+         * send rather than out of room to send them. A path that is handed
+         * work and fails to deliver it is not app-limited, so it keeps its
+         * measured (low) weight, and the branch below still floors one
+         * whose goodput has decayed to zero. That is what stops a stale
+         * estimate from handing a 0 B/s path a majority share. */
+        if (xqc_send_ctl_is_app_limited(ctl)) {
+            uint64_t capacity_Bps = xqc_send_ctl_get_est_bw(ctl);
+            if (capacity_Bps > weight) {
+                weight = capacity_Bps;
+            }
+        }
         /* Measured acked goodput is already net of every lost packet, so
          * loss takes only a gentle linear haircut here — enough to shed
          * load from a degrading path before the EWMA catches up, without
