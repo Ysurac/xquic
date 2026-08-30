@@ -504,6 +504,29 @@ wlb_compute_goodput_weight(wlb_path_weight_t *entry, xqc_path_ctx_t *path,
             }
             weight = (uint64_t)((double)weight * (100.0 - loss_percent) / 100.0);
         }
+        /* Bufferbloat haircut: srtt/min_rtt measures the standing queue in
+         * units of the path's propagation delay. A path buffering multiples
+         * of its base RTT still ACKs everything eventually -- measured
+         * goodput looks healthy -- but its packets arrive so far behind the
+         * other paths' that a resequencing peer times them out and inner
+         * TCP books them as losses (observed live: a cellular attach at
+         * ~3 s srtt over a 170 ms floor turned its whole sprayed share into
+         * reorder-timeout drops). Scale the weight by 2*min_rtt/srtt beyond
+         * a 2x operating point (BBR steady state sits at 1-1.5x min), which
+         * closes the loop the plain goodput weight leaves open: less
+         * traffic -> queue drains -> srtt recovers -> weight returns. The
+         * steady floor keeps probing the path meanwhile. min_rtt == 0
+         * (zeroed test fixtures) and the pre-first-sample
+         * XQC_MAX_UINT32_VALUE sentinel both fail srtt > 2*min_rtt and skip
+         * the haircut. */
+        xqc_usec_t bloat_srtt = xqc_send_ctl_get_srtt(ctl);
+        xqc_usec_t bloat_min = ctl->ctl_minrtt;
+        if (bloat_min > 0 && bloat_srtt > 2 * bloat_min) {
+            weight = weight * (2 * bloat_min) / bloat_srtt;
+            if (weight == 0) {
+                weight = 1;
+            }
+        }
     } else if (entry->warmup) {
         /* Bootstrap: the congestion controller's bandwidth estimate has not
          * paid for its losses yet, so discount it aggressively. */

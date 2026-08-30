@@ -1143,6 +1143,37 @@ xqc_test_wlb_equal_goodput_is_balanced(void)
 }
 
 void
+xqc_test_wlb_bloated_path_sheds_weight(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    /* Equal acknowledged goodput on both paths, but path 1 is deeply
+     * bufferbloated: 2 s smoothed RTT over a 90 ms floor (a live cellular
+     * attach exhibited exactly this). Goodput alone would split the load
+     * 50/50 and keep feeding the queue; the bloat haircut must scale
+     * path 1 down to 2*min/srtt = 9% of its measured share so the queue
+     * can drain. Path 0 sits at 100 ms srtt over the same floor -- inside
+     * the 2x operating point, untouched. */
+    xqc_path_ctx_t *healthy = wlb_test_add_path(&f, 0, 100000, 64 * 1024, 0);
+    xqc_path_ctx_t *bloated = wlb_test_add_path(&f, 1, 2000000, 64 * 1024, 0);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(healthy);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(bloated);
+    healthy->path_send_ctl->ctl_minrtt = 90000;
+    bloated->path_send_ctl->ctl_minrtt = 90000;
+    wlb_test_drain_initial_round(&f);
+
+    wlb_test_clock_advance(1000000);
+    wlb_test_record_delivery(&f, 0, 1024 * 1024);
+    wlb_test_record_delivery(&f, 1, 1024 * 1024);
+
+    int path0_count = wlb_test_count_stream_path(&f, 0, 100);
+    CU_ASSERT_TRUE(path0_count >= 80);
+
+    wlb_test_teardown(&f);
+}
+
+void
 xqc_test_wlb_four_to_one_goodput_after_acked_warmup(void)
 {
     wlb_test_fixture_t f;

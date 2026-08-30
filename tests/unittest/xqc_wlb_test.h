@@ -74,6 +74,7 @@ void xqc_test_wlb_measured_goodput_ignores_loss_penalty(void);
 void xqc_test_wlb_idle_path_goodput_decays(void);
 void xqc_test_wlb_warmed_zero_goodput_ignores_stale_estimate(void);
 void xqc_test_wlb_equal_goodput_is_balanced(void);
+void xqc_test_wlb_bloated_path_sheds_weight(void);
 void xqc_test_wlb_four_to_one_goodput_after_acked_warmup(void);
 void xqc_test_wlb_new_path_gets_warmup_floor(void);
 void xqc_test_wlb_steady_path_gets_exploration_floor(void);
