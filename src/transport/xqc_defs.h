@@ -47,11 +47,17 @@
 #define XQC_MAX_CRYPTO_FRAME_BUFFERED_BYTES     (1*1024*1024)  /* max buffered data bytes per crypto stream (1MB), accommodates large cert chains under reordering */
 
 /*
- * CWE-770 mitigation: limit buffered out-of-order STREAM frame nodes.
- * Prevents sparse 1-byte fragment attacks that exploit per-node metadata overhead
- * to achieve ~56x memory amplification within flow control budget (RFC 9000 §21.7).
+ * CWE-770 mitigation for buffered STREAM frame nodes (RFC 9000 §21.7).
+ *
+ * 8192 remains the sparse-fragment threshold: beyond it, a stream must carry
+ * enough payload per node to avoid metadata amplification.  A separate hard
+ * ceiling still bounds dense packet-sized nodes.  The hard ceiling covers a
+ * full 16 MiB receive window even when ordinary QUIC/H3 framing leaves less
+ * than one MSS of application payload in each packet.
  */
-#define XQC_MAX_STREAM_FRAME_BUFFERED_COUNT     8192    /* max buffered frame nodes per stream */
+#define XQC_MAX_STREAM_FRAME_BUFFERED_COUNT          8192
+#define XQC_MAX_STREAM_FRAME_BUFFERED_COUNT_HARD     32768
+#define XQC_MIN_STREAM_BUFFERED_BYTES_PER_FRAME      256
 
 
 /* xquic will not send stateless reset to packets which are smaller than

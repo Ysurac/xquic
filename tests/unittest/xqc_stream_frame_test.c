@@ -576,3 +576,51 @@ xqc_test_stream_frame_cap_setting()
 
     xqc_engine_destroy(conn->engine);
 }
+
+/**
+ * A full-size receive window can legitimately contain more than 8192 packet-sized
+ * STREAM frames while the application is backpressured or a multipath gap is being
+ * repaired.  The sparse-fragment guard must keep rejecting tiny-frame amplification,
+ * but it must not close a healthy connection whose buffered nodes carry substantial
+ * payload.
+ */
+void
+xqc_test_stream_frame_dense_buffer_budget()
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_PTR_NOT_NULL_FATAL(conn);
+
+    xqc_stream_t *stream = xqc_stream_create_with_direction(conn, XQC_STREAM_BIDI, NULL);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(stream);
+
+    stream->stream_data_in.buffered_frame_count = XQC_MAX_STREAM_FRAME_BUFFERED_COUNT;
+    stream->stream_data_in.buffered_data_bytes =
+        XQC_MAX_STREAM_FRAME_BUFFERED_COUNT * 1024;
+
+    xqc_stream_frame_t *frame = xqc_calloc(1, sizeof(*frame));
+    CU_ASSERT_PTR_NOT_NULL_FATAL(frame);
+    frame->data_length = 1024;
+    frame->data_offset = stream->stream_data_in.buffered_data_bytes + 4096;
+    frame->data = xqc_malloc(frame->data_length);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(frame->data);
+
+    CU_ASSERT_EQUAL(xqc_insert_stream_frame(conn, stream, frame), XQC_OK);
+    CU_ASSERT_EQUAL(stream->stream_data_in.buffered_data_bytes,
+                    (XQC_MAX_STREAM_FRAME_BUFFERED_COUNT + 1) * 1024);
+
+    xqc_stream_frame_t *hard_frame = xqc_calloc(1, sizeof(*hard_frame));
+    CU_ASSERT_PTR_NOT_NULL_FATAL(hard_frame);
+    hard_frame->data_length = 1024;
+    hard_frame->data_offset = frame->data_offset + frame->data_length + 4096;
+    hard_frame->data = xqc_malloc(hard_frame->data_length);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(hard_frame->data);
+
+    stream->stream_data_in.buffered_frame_count =
+        XQC_MAX_STREAM_FRAME_BUFFERED_COUNT_HARD;
+    stream->stream_data_in.buffered_data_bytes =
+        XQC_MAX_STREAM_FRAME_BUFFERED_COUNT_HARD * 1024;
+    CU_ASSERT_EQUAL(xqc_insert_stream_frame(conn, stream, hard_frame), -XQC_ELIMIT);
+    xqc_destroy_stream_frame(hard_frame);
+
+    xqc_engine_destroy(conn->engine);
+}

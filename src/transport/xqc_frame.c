@@ -98,42 +98,68 @@ xqc_insert_stream_frame(xqc_connection_t *conn, xqc_stream_t *stream,
                         xqc_stream_frame_t *new_frame)
 {
     /* CWE-770 mitigation (RFC 9000 §21.7 stream fragmentation attacks):
-     * bound the number of buffered out-of-order frame nodes per stream,
-     * with one slot held in reserve for a frame that extends the
-     * contiguous prefix (data_offset <= merged_offset_end < data_offset +
-     * data_length). Rejecting prefix-extending retransmissions at the cap
-     * would make the leftmost reassembly hole unfillable — the buffered
-     * beyond-hole frames could never merge or become readable and the
-     * stream would livelock. Beyond-hole frames therefore stop at
-     * (cap - 1) so they cannot consume the reserved slot, and
-     * prefix-extending frames stop at the cap, keeping the hard bound.
-     * The reserved slot cannot be farmed: frames entirely below
-     * merged_offset_end never reach this function (the caller drops them
-     * as already received), zero-length FIN-only frames never qualify as
-     * prefix-extenders (the caller's stream_determined gate stops the
-     * at-final-offset repeats; beyond-hole FIN duplicates stay under the
+     * bound the buffered out-of-order frame nodes per stream, with one slot
+     * held in reserve for a frame that extends the contiguous prefix
+     * (data_offset <= merged_offset_end < data_offset + data_length).
+     *
+     * Two limits, because a node count alone cannot separate an attack from a
+     * busy stream. 8192 nodes is the sparse-fragment threshold: past it a
+     * stream must carry at least XQC_MIN_STREAM_BUFFERED_BYTES_PER_FRAME of
+     * payload per node, which a 1-byte-fragment attack cannot. Dense
+     * packet-sized frames instead run up to the hard ceiling, which covers a
+     * full 16 MiB receive window -- application backpressure and multipath
+     * reordering can legitimately queue more than 8192 packet-sized frames.
+     * A conn_settings override collapses both tiers onto the operator's
+     * value, so a configured cap stays the absolute bound it used to be.
+     *
+     * Why the reserved slot: rejecting prefix-extending retransmissions at
+     * the cap would make the leftmost reassembly hole unfillable -- the
+     * buffered beyond-hole frames could never merge or become readable and
+     * the stream would livelock. Beyond-hole frames therefore stop one short
+     * of each limit so they cannot consume the reserved slot, while a
+     * prefix-extending frame may take it. The slot cannot be farmed: frames
+     * entirely below merged_offset_end never reach this function (the caller
+     * drops them as already received), zero-length FIN-only frames never
+     * qualify as prefix-extenders (the caller's stream_determined gate stops
+     * the at-final-offset repeats; beyond-hole FIN duplicates stay under the
      * beyond-hole bound), and every admitted prefix-extender advances
-     * merged_offset_end, making buffered data
-     * readable so the application can drain it. The caller converts the
-     * rejection into a whole-packet unacked drop, not a connection
-     * error. First rejection of an episode logs at WARN, the rest at
-     * DEBUG (a single episode can span thousands of packets). */
+     * merged_offset_end, making buffered data readable so the application can
+     * drain it. The caller converts the rejection into a whole-packet unacked
+     * drop, not a connection error. First rejection of an episode logs at
+     * WARN, the rest at DEBUG (a single episode can span thousands of
+     * packets). */
     {
-        uint64_t cap = conn->conn_settings.max_stream_frame_buffered_cnt > 0
-                           ? conn->conn_settings.max_stream_frame_buffered_cnt
-                           : XQC_MAX_STREAM_FRAME_BUFFERED_COUNT;
-        uint64_t buffered = stream->stream_data_in.buffered_frame_count;
+        uint64_t cfg = conn->conn_settings.max_stream_frame_buffered_cnt;
+        uint64_t sparse_cap = cfg > 0 ? cfg : XQC_MAX_STREAM_FRAME_BUFFERED_COUNT;
+        uint64_t hard_cap = cfg > 0 ? cfg : XQC_MAX_STREAM_FRAME_BUFFERED_COUNT_HARD;
+        uint64_t buffered_count = stream->stream_data_in.buffered_frame_count;
+        uint64_t buffered_bytes = stream->stream_data_in.buffered_data_bytes;
         int extends_prefix =
             new_frame->data_offset <= stream->stream_data_in.merged_offset_end
             && new_frame->data_offset + new_frame->data_length
                 > stream->stream_data_in.merged_offset_end;
 
-        if (buffered + (extends_prefix ? 0 : 1) >= cap) {
+        /* The reserved slot shifts only which count trips a limit. The
+         * density test below keeps counting real nodes, so admitting one
+         * prefix-extender cannot relax the amplification bound. */
+        uint64_t count_after = buffered_count + (extends_prefix ? 0 : 1);
+
+        xqc_bool_t hard_limit = count_after >= hard_cap;
+        xqc_bool_t sparse_limit =
+            count_after >= sparse_cap
+            && buffered_bytes + new_frame->data_length
+                   < (buffered_count + 1)
+                         * XQC_MIN_STREAM_BUFFERED_BYTES_PER_FRAME;
+
+        if (hard_limit || sparse_limit) {
             xqc_log_level_t lvl = stream->stream_data_in.cap_reject_logged
                                       ? XQC_LOG_DEBUG : XQC_LOG_WARN;
             xqc_log(conn->log, lvl,
-                    "|stream frame buffered count exceed|stream_id:%ui|count:%ui|limit:%ui|",
-                    stream->stream_id, buffered, cap);
+                    "|stream frame buffered count exceed|stream_id:%ui|count:%ui|"
+                    "bytes:%ui|sparse_cap:%ui|hard_cap:%ui|"
+                    "sparse_limit:%d|hard_limit:%d|",
+                    stream->stream_id, buffered_count, buffered_bytes,
+                    sparse_cap, hard_cap, (int)sparse_limit, (int)hard_limit);
             stream->stream_data_in.cap_reject_logged = 1;
             return -XQC_ELIMIT;
         }
@@ -226,6 +252,7 @@ xqc_insert_stream_frame(xqc_connection_t *conn, xqc_stream_t *stream,
     /* update buffered resource counter */
     stream->stream_data_in.buffered_frame_count++;
     stream->stream_data_in.cap_reject_logged = 0;
+    stream->stream_data_in.buffered_data_bytes += new_frame->data_length;
 
     return XQC_OK;
 }
