@@ -624,3 +624,56 @@ xqc_test_stream_frame_dense_buffer_budget()
 
     xqc_engine_destroy(conn->engine);
 }
+
+/**
+ * The reserved prefix slot has to survive the sparse-density tier as well as
+ * the node-count tier. A stream sitting at the sparse threshold with exactly
+ * the minimum density would otherwise reject the one small frame that fills
+ * the leftmost hole: the extra node drops the average below the minimum, so
+ * the density test fires even though the count test deliberately exempted
+ * that frame. Nothing about the stream changes on rejection, so the
+ * retransmission is refused forever and the stream livelocks -- precisely
+ * what the reserved slot exists to prevent. A beyond-hole frame in the same
+ * state must still be rejected, or the tier would be disabled rather than
+ * exempted.
+ */
+void
+xqc_test_stream_frame_dense_prefix_liveness()
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_PTR_NOT_NULL_FATAL(conn);
+
+    xqc_stream_t *stream = xqc_stream_create_with_direction(conn, XQC_STREAM_BIDI, NULL);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(stream);
+
+    stream->stream_data_in.merged_offset_end = 0;
+    stream->stream_data_in.buffered_frame_count = XQC_MAX_STREAM_FRAME_BUFFERED_COUNT;
+    stream->stream_data_in.buffered_data_bytes =
+        (uint64_t)XQC_MAX_STREAM_FRAME_BUFFERED_COUNT
+            * XQC_MIN_STREAM_BUFFERED_BYTES_PER_FRAME;
+
+    xqc_stream_frame_t *prefix = xqc_calloc(1, sizeof(*prefix));
+    CU_ASSERT_PTR_NOT_NULL_FATAL(prefix);
+    prefix->data_offset = 0;
+    prefix->data_length = 1;
+    prefix->data = xqc_malloc(prefix->data_length);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(prefix->data);
+    CU_ASSERT_EQUAL(xqc_insert_stream_frame(conn, stream, prefix), XQC_OK);
+
+    stream->stream_data_in.merged_offset_end = 0;
+    stream->stream_data_in.buffered_frame_count = XQC_MAX_STREAM_FRAME_BUFFERED_COUNT;
+    stream->stream_data_in.buffered_data_bytes =
+        (uint64_t)XQC_MAX_STREAM_FRAME_BUFFERED_COUNT
+            * XQC_MIN_STREAM_BUFFERED_BYTES_PER_FRAME;
+
+    xqc_stream_frame_t *beyond = xqc_calloc(1, sizeof(*beyond));
+    CU_ASSERT_PTR_NOT_NULL_FATAL(beyond);
+    beyond->data_offset = 1ULL << 20;
+    beyond->data_length = 1;
+    beyond->data = xqc_malloc(beyond->data_length);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(beyond->data);
+    CU_ASSERT_EQUAL(xqc_insert_stream_frame(conn, stream, beyond), -XQC_ELIMIT);
+    xqc_destroy_stream_frame(beyond);
+
+    xqc_engine_destroy(conn->engine);
+}

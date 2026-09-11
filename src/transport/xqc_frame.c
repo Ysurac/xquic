@@ -139,17 +139,24 @@ xqc_insert_stream_frame(xqc_connection_t *conn, xqc_stream_t *stream,
             && new_frame->data_offset + new_frame->data_length
                 > stream->stream_data_in.merged_offset_end;
 
-        /* The reserved slot shifts only which count trips a limit. The
-         * density test below keeps counting real nodes, so admitting one
-         * prefix-extender cannot relax the amplification bound. */
+        /* The reserved slot has to exempt the frame from BOTH limits. Using
+         * the real post-insert node count as the density budget looks more
+         * honest, but it re-breaks the invariant: a stream sitting at the
+         * sparse threshold with exactly the minimum density rejects the one
+         * small frame that would fill the leftmost hole, because that node
+         * drops the average below the minimum. Nothing changes on rejection,
+         * so the retransmission is refused forever and the stream livelocks.
+         * Charging the density budget at count_after keeps the exemption
+         * coherent across both tiers; it cannot be farmed, because only a
+         * prefix-extender gets it and every admitted prefix-extender advances
+         * merged_offset_end. */
         uint64_t count_after = buffered_count + (extends_prefix ? 0 : 1);
 
         xqc_bool_t hard_limit = count_after >= hard_cap;
         xqc_bool_t sparse_limit =
             count_after >= sparse_cap
             && buffered_bytes + new_frame->data_length
-                   < (buffered_count + 1)
-                         * XQC_MIN_STREAM_BUFFERED_BYTES_PER_FRAME;
+                   < count_after * XQC_MIN_STREAM_BUFFERED_BYTES_PER_FRAME;
 
         if (hard_limit || sparse_limit) {
             xqc_log_level_t lvl = stream->stream_data_in.cap_reject_logged

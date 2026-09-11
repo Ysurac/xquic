@@ -1431,9 +1431,17 @@ typedef struct xqc_conn_settings_s {
     uint64_t sndq_packets_used_max;
     /**
      * Max buffered out-of-order STREAM frame nodes per stream (reassembly
-     * cap, CWE-770 mitigation per RFC 9000 §21.7). 0 means the built-in
-     * default (8192). Lowering it bounds reassembly memory more tightly at
-     * the cost of more retransmissions under heavy cross-path reordering.
+     * cap, CWE-770 mitigation per RFC 9000 §21.7).
+     *
+     * 0 selects the built-in two-tier default: past 8192 nodes a stream must
+     * average at least 256 bytes of payload per node, and 32768 nodes is the
+     * ceiling regardless of density. That lets a full receive window of
+     * packet-sized frames queue while still stopping sparse-fragment
+     * amplification.
+     *
+     * Any nonzero value is a single absolute cap on node count, density
+     * ignored. Lowering it bounds reassembly memory more tightly at the cost
+     * of more retransmissions under heavy cross-path reordering.
      */
     uint64_t max_stream_frame_buffered_cnt;
     xqc_linger_t linger;
