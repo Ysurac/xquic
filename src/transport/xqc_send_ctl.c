@@ -1775,9 +1775,11 @@ xqc_send_ctl_on_packet_acked(xqc_send_ctl_t *send_ctl,
         && conn->scheduler_callback != NULL
         && conn->scheduler_callback->xqc_scheduler_on_app_packet_acked)
     {
-        conn->scheduler_callback->xqc_scheduler_on_app_packet_acked(
-            conn->scheduler, packet_out->po_path_id,
-            xqc_send_ctl_app_payload_bytes(packet_out), now);
+        uint64_t app_payload_bytes = xqc_send_ctl_app_payload_bytes(packet_out);
+        if (app_payload_bytes > 0) {
+            conn->scheduler_callback->xqc_scheduler_on_app_packet_acked(
+                conn->scheduler, packet_out->po_path_id, app_payload_bytes, now);
+        }
     }
 
     if ((conn->conn_type == XQC_CONN_TYPE_SERVER) && (acked_packet->po_frame_types & XQC_FRAME_BIT_HANDSHAKE_DONE)) {

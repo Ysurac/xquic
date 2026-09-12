@@ -914,10 +914,10 @@ xqc_wlb_scheduler_init(void *scheduler, xqc_log_t *log, xqc_scheduler_params_t *
     s->recovery_prefer_path_id = WLB_NO_PATH_ID;
 }
 
-void
+static void
 xqc_wlb_scheduler_on_app_packet_acked(void *scheduler, uint64_t path_id,
                                       uint64_t payload_bytes,
-                                      uint64_t ack_time_us)
+                                      xqc_usec_t ack_time_us)
 {
     if (scheduler == NULL || payload_bytes == 0) {
         return;

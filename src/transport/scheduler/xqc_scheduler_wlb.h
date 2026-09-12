@@ -29,8 +29,5 @@ typedef struct {
 
 int xqc_wlb_scheduler_copy_path_stats(void *scheduler, xqc_wlb_path_stats_t *out,
                                       size_t capacity, size_t *out_count);
-void xqc_wlb_scheduler_on_app_packet_acked(void *scheduler, uint64_t path_id,
-                                           uint64_t payload_bytes,
-                                           uint64_t ack_time_us);
 
 #endif /* _XQC_SCHEDULER_WLB_H_INCLUDED_ */
