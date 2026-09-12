@@ -1,7 +1,7 @@
 /**
  * @copyright Copyright (c) 2026, mp0rta
  *
- * WLB (Weighted Load Balancing) multipath scheduler for QUIC application data.
+ * WLB (Weighted Load Balancing) multipath scheduler for QUIC Datagrams.
  *
  * Datagram packets belonging to the same inner flow
  * (identified by po_flow_hash) are pinned to the same QUIC path.  This
@@ -858,9 +858,11 @@ wlb_wrr_select(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
 /* ================================================================
  *  MinRTT fallback
  *
- *  Used for control packets and when WRR has no active paths. Selects the
- *  path with the lowest SRTT that
- *  has cwnd headroom.
+ *  Used for every packet without a flow hash -- STREAM data and control
+ *  packets alike -- and when WRR has no active paths. Selects the path with
+ *  the lowest SRTT that has cwnd headroom, spilling to the next one as each
+ *  fills its cwnd. See xqc_wlb_scheduler_get_path for why STREAM belongs
+ *  here.
  * ================================================================ */
 
 static xqc_path_ctx_t *
@@ -1056,10 +1058,9 @@ wlb_pick_evicted_probe(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
 /**
  * Main scheduling entry point.
  *
- * 1. STREAM data (Hybrid TCP lane)             → WRR without flow table.
- * 2. po_flow_hash == 0 (control packets)       → MinRTT fallback.
- * 3. po_flow_hash == UNPINNED (UDP/QUIC)       → WRR without flow table.
- * 4. Otherwise (TCP datagrams)                 → flow table lookup + WRR with pinning.
+ * 1. po_flow_hash == 0 (STREAM data, control) → MinRTT fallback.
+ * 2. po_flow_hash == UNPINNED (UDP/QUIC)      → WRR without flow table.
+ * 3. Otherwise (TCP datagrams)                → flow table lookup + WRR with pinning.
  */
 static xqc_path_ctx_t *
 xqc_wlb_scheduler_get_path(void *scheduler,
@@ -1076,13 +1077,36 @@ xqc_wlb_scheduler_get_path(void *scheduler,
         return wlb_minrtt_fallback(conn, packet_out, check_cwnd, reinject, cc_blocked);
     }
 
-    /* Hybrid lane bytes are reliable QUIC STREAM data. QUIC reassembly
-     * absorbs cross-path reordering, so schedule these packets per-packet
-     * across available paths. Keep ACK and other control-only packets on
-     * MinRTT so application-data balancing does not delay control traffic. */
-    xqc_bool_t stream_data =
-        (packet_out->po_frame_types & XQC_FRAME_BIT_STREAM) != 0;
-    if (packet_out->po_flow_hash == 0 && !stream_data) {
+    /* Everything without a flow hash -- STREAM data and control packets --
+     * goes to MinRTT. For STREAM that is a deliberate choice, not an
+     * unfinished case, so measure before changing it:
+     *
+     * A reliable stream is one ordered byte sequence, so the only question
+     * left for a scheduler is how fast each path may be driven, and the cwnd
+     * gate in xqc_scheduler_check_path_can_send already answers it exactly.
+     * It counts bytes_in_flight PLUS path_schedule_bytes, so within a single
+     * send pass MinRTT fills the lowest-SRTT path to its cwnd and then spills
+     * to the next one; each path is then refilled at its own RTT, which is
+     * its delivery capacity by construction. Measured on a 20ms/100Mbps +
+     * 170ms/50Mbps pair: once both cwnds fill, MinRTT and weighted WRR place
+     * *identical* per-path totals. Weights buy nothing there.
+     *
+     * Below saturation they diverge, and not in WRR's favour: WRR put 35% of
+     * the stream on the 170ms path while the 20ms path still had cwnd to
+     * spare, and it does not decay -- an under-fed path is app-limited, so
+     * wlb_compute_goodput_weight credits it its est_bw and it keeps a
+     * capacity-proportional share indefinitely (37% after six seconds).
+     * Every one of those packets is a reassembly hole, and unlike a datagram
+     * there is no deadline layer underneath: a tunnel-side reorder buffer can
+     * give up and deliver, QUIC stream reassembly must wait for the
+     * retransmission. Its only knob is the buffer bound in xqc_defs.h.
+     *
+     * Corollary for anyone reading a load split: aggregation is only expected
+     * where one path cannot absorb the offered load. On an UNSHAPED pair,
+     * 100%-on-one-path is correct behaviour. Shape the legs before calling it
+     * a missed aggregation -- netem-shaped, the stream lane reaches ~96% of
+     * the sum of its single-path legs on MinRTT. */
+    if (packet_out->po_flow_hash == 0) {
         return wlb_minrtt_fallback(conn, packet_out, check_cwnd, reinject, cc_blocked);
     }
 
@@ -1091,8 +1115,7 @@ xqc_wlb_scheduler_get_path(void *scheduler,
     }
 
     /* TCP flows are pinned to paths; UDP/QUIC use per-packet WRR */
-    xqc_bool_t pin_flow =
-        (!stream_data && packet_out->po_flow_hash != WLB_FLOW_HASH_UNPINNED);
+    xqc_bool_t pin_flow = (packet_out->po_flow_hash != WLB_FLOW_HASH_UNPINNED);
 
     uint64_t now_us = xqc_monotonic_timestamp();
 

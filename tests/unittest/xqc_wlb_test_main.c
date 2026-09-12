@@ -47,10 +47,10 @@ main(void)
                                xqc_test_wlb_new_path_detected_without_expire_throttle)
         || NULL == CU_add_test(s, "reinject_bypasses_pin",
                                xqc_test_wlb_reinject_bypasses_pin)
-        || NULL == CU_add_test(s, "stream_data_distributes",
-                               xqc_test_wlb_stream_data_distributes)
-        || NULL == CU_add_test(s, "stream_data_weights_asymmetric_paths",
-                               xqc_test_wlb_stream_data_weights_asymmetric_paths)
+        || NULL == CU_add_test(s, "stream_data_prefers_lowest_srtt",
+                               xqc_test_wlb_stream_data_prefers_lowest_srtt)
+        || NULL == CU_add_test(s, "stream_data_spills_when_primary_is_full",
+                               xqc_test_wlb_stream_data_spills_when_primary_is_full)
         || NULL == CU_add_test(s, "stream_path_replacement_refreshes_cache",
                                xqc_test_wlb_stream_path_replacement_refreshes_cache)
         || NULL == CU_add_test(s, "control_packets_use_minrtt",

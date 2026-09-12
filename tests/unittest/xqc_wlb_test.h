@@ -58,11 +58,14 @@ void xqc_test_wlb_new_path_detected_without_expire_throttle(void);
  * flow whose replica's po_path_id equals the pinned path. */
 void xqc_test_wlb_reinject_bypasses_pin(void);
 
-/* Hybrid TCP lane bytes are QUIC STREAM data with po_flow_hash == 0.
- * They must use unpinned weighted scheduling so one inner TCP flow can
- * consume multiple paths; ACK/control-only packets remain on MinRTT. */
-void xqc_test_wlb_stream_data_distributes(void);
-void xqc_test_wlb_stream_data_weights_asymmetric_paths(void);
+/* Hybrid TCP lane bytes are QUIC STREAM data with po_flow_hash == 0, and
+ * they take the MinRTT fallback, not WRR. One ordered byte sequence has
+ * nothing to gain from a second estimator on top of cwnd, and every packet
+ * placed on a higher-RTT path is a reassembly hole with no deadline layer
+ * under it. MinRTT still aggregates: the cwnd gate spills once the near path
+ * is full. See xqc_wlb_scheduler_get_path for the measurements. */
+void xqc_test_wlb_stream_data_prefers_lowest_srtt(void);
+void xqc_test_wlb_stream_data_spills_when_primary_is_full(void);
 void xqc_test_wlb_stream_path_replacement_refreshes_cache(void);
 void xqc_test_wlb_control_packets_use_minrtt(void);
 void xqc_test_wlb_evicted_path_gets_recovery_probe(void);

@@ -1,7 +1,7 @@
 /**
  * @copyright Copyright (c) 2026, mp0rta
  *
- * WLB (Weighted Load Balancing) multipath scheduler for QUIC application data.
+ * WLB (Weighted Load Balancing) multipath scheduler for QUIC Datagrams.
  *
  * Flow-affinity WRR weighted by acknowledged-goodput learning.
  * Inner flows are pinned to paths via hash table to prevent TCP reordering.

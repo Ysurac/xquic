@@ -251,6 +251,15 @@ wlb_test_invoke_stream(wlb_test_fixture_t *f)
     return p ? p->path_id : UINT64_MAX;
 }
 
+/* The WRR driver. STREAM data takes the MinRTT fallback by design, so a test
+ * that wants to exercise weighted round robin sends an UNPINNED datagram --
+ * same path through the scheduler, minus the flow table. */
+static uint64_t
+wlb_test_invoke_unpinned(wlb_test_fixture_t *f)
+{
+    return wlb_test_invoke(f, UINT32_MAX); /* WLB_FLOW_HASH_UNPINNED */
+}
+
 static uint64_t
 wlb_test_invoke_control(wlb_test_fixture_t *f)
 {
@@ -268,7 +277,7 @@ static void
 wlb_test_drain_initial_round(wlb_test_fixture_t *f)
 {
     for (int i = 0; i < 100; i++) {
-        (void)wlb_test_invoke_stream(f);
+        (void)wlb_test_invoke_unpinned(f);
     }
 }
 
@@ -347,12 +356,12 @@ wlb_test_record_generated_datagram_delivery(wlb_test_fixture_t *f,
 }
 
 static int
-wlb_test_count_stream_path(wlb_test_fixture_t *f, uint64_t path_id,
+wlb_test_count_unpinned_path(wlb_test_fixture_t *f, uint64_t path_id,
                            int opportunities)
 {
     int count = 0;
     for (int i = 0; i < opportunities; i++) {
-        if (wlb_test_invoke_stream(f) == path_id) {
+        if (wlb_test_invoke_unpinned(f) == path_id) {
             count++;
         }
     }
@@ -712,53 +721,63 @@ xqc_test_wlb_reinject_bypasses_pin(void)
 }
 
 void
-xqc_test_wlb_stream_data_distributes(void)
+xqc_test_wlb_stream_data_prefers_lowest_srtt(void)
 {
     wlb_test_fixture_t f;
     wlb_test_setup(&f);
 
-    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
-    wlb_test_add_path(&f, 1, 25000, 64 * 1024, 0);
+    wlb_test_add_path(&f, 0,  20000, 1024 * 1024, 0);   /* 20 ms  */
+    wlb_test_add_path(&f, 1, 170000, 1024 * 1024, 0);   /* 170 ms */
 
-    int on_path0 = 0;
-    int on_path1 = 0;
-    for (int i = 0; i < 8; i++) {
-        uint64_t selected = wlb_test_invoke_stream(&f);
-        if (selected == 0) {
-            on_path0++;
-        } else if (selected == 1) {
-            on_path1++;
+    /* A reliable stream is one ordered byte sequence, so while the low-SRTT
+     * path has cwnd headroom there is nothing to gain by putting bytes on a
+     * path 150 ms further away -- every one of them is a reassembly hole the
+     * reader has to wait behind. STREAM data therefore takes the MinRTT
+     * fallback, not WRR. Measured before this was pinned down: WRR put 35%
+     * of the stream on the slow path here and never backed off, because an
+     * under-fed path reads as app-limited and keeps a capacity-proportional
+     * weight. */
+    int on_slow = 0;
+    for (int i = 0; i < 50; i++) {
+        if (wlb_test_invoke_stream(&f) == 1) {
+            on_slow++;
         }
     }
-
-    CU_ASSERT_TRUE(on_path0 > 0);
-    CU_ASSERT_TRUE(on_path1 > 0);
+    CU_ASSERT_EQUAL(on_slow, 0);
 
     wlb_test_teardown(&f);
 }
 
+/**
+ * ...and it still aggregates. MinRTT is not "one path only": the cwnd gate
+ * counts bytes already scheduled this pass, so once the near path is full the
+ * next packet spills to the far one. That is what makes a shaped two-path
+ * stream lane reach ~96% of the sum of its legs without any weighting.
+ */
 void
-xqc_test_wlb_stream_data_weights_asymmetric_paths(void)
+xqc_test_wlb_stream_data_spills_when_primary_is_full(void)
 {
     wlb_test_fixture_t f;
     wlb_test_setup(&f);
 
-    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
-    wlb_test_add_path(&f, 1, 25000, 16 * 1024, 0);
+    /* Near path cwnd fits exactly two 100-byte packets; far path is wide. */
+    wlb_test_add_path(&f, 0,  20000,        250, 0);
+    wlb_test_add_path(&f, 1, 170000, 1024 * 1024, 0);
 
-    int on_wide = 0;
-    int on_narrow = 0;
-    for (int i = 0; i < 20; i++) {
-        uint64_t selected = wlb_test_invoke_stream(&f);
-        if (selected == 0) {
-            on_wide++;
-        } else if (selected == 1) {
-            on_narrow++;
+    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 0);
+    f.send_ctls[0].ctl_bytes_in_flight = 200;   /* near path now full */
+
+    int on_far = 0;
+    for (int i = 0; i < 10; i++) {
+        if (wlb_test_invoke_stream(&f) == 1) {
+            on_far++;
         }
     }
+    CU_ASSERT_EQUAL(on_far, 10);
 
-    CU_ASSERT_TRUE(on_wide > on_narrow);
-    CU_ASSERT_TRUE(on_narrow > 0);
+    /* And it returns as soon as the near path drains. */
+    f.send_ctls[0].ctl_bytes_in_flight = 0;
+    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 0);
 
     wlb_test_teardown(&f);
 }
@@ -773,15 +792,15 @@ xqc_test_wlb_stream_path_replacement_refreshes_cache(void)
     xqc_path_ctx_t *old_relay =
         wlb_test_add_path(&f, 1, 25000, 64 * 1024, 0);
 
-    (void)wlb_test_invoke_stream(&f);
-    (void)wlb_test_invoke_stream(&f);
+    (void)wlb_test_invoke_unpinned(&f);
+    (void)wlb_test_invoke_unpinned(&f);
 
     wlb_test_detach_path(old_relay);
     wlb_test_add_path(&f, 2, 25000, 64 * 1024, 0);
 
     int saw_replacement = 0;
     for (int i = 0; i < 8; i++) {
-        if (wlb_test_invoke_stream(&f) == 2) {
+        if (wlb_test_invoke_unpinned(&f) == 2) {
             saw_replacement = 1;
         }
     }
@@ -845,7 +864,7 @@ xqc_test_wlb_evicted_path_gets_recovery_probe(void)
     relay->path_send_ctl->ctl_pto_count = 0;
     int on_relay = 0;
     for (int i = 0; i < 32; i++) {
-        if (wlb_test_invoke_stream(&f) == 1) {
+        if (wlb_test_invoke_unpinned(&f) == 1) {
             on_relay++;
         }
     }
@@ -938,7 +957,7 @@ xqc_test_wlb_blackholed_path_does_not_stall_rounds(void)
     relay->path_send_ctl->ctl_pto_count = 3;
 
     for (int i = 0; i < 32; i++) {
-        uint64_t selected = wlb_test_invoke_stream(&f);
+        uint64_t selected = wlb_test_invoke_unpinned(&f);
         CU_ASSERT_EQUAL(selected, 0);
     }
 
@@ -950,7 +969,7 @@ xqc_test_wlb_blackholed_path_does_not_stall_rounds(void)
     int on_direct = 0;
     int on_relay = 0;
     for (int i = 0; i < 32; i++) {
-        uint64_t selected = wlb_test_invoke_stream(&f);
+        uint64_t selected = wlb_test_invoke_unpinned(&f);
         if (selected == 0) {
             on_direct++;
         } else if (selected == 1) {
@@ -1019,8 +1038,8 @@ xqc_test_wlb_routine_path_event_preserves_round(void)
 
     int saw_narrow = 0;
     for (int i = 0; i < 16; i++) {
-        uint64_t expected = wlb_test_invoke_stream(&baseline);
-        uint64_t selected = wlb_test_invoke_stream(&with_events);
+        uint64_t expected = wlb_test_invoke_unpinned(&baseline);
+        uint64_t selected = wlb_test_invoke_unpinned(&with_events);
         CU_ASSERT_EQUAL(selected, expected);
         if (selected == 1) {
             saw_narrow = 1;
@@ -1055,7 +1074,7 @@ xqc_test_wlb_measured_goodput_ignores_loss_penalty(void)
     lossy->path_send_ctl->ctl_recent_send_count[0] = 100;
     lossy->path_send_ctl->ctl_recent_lost_count[0] = 6;
 
-    int path0_count = wlb_test_count_stream_path(&f, 0, 100);
+    int path0_count = wlb_test_count_unpinned_path(&f, 0, 100);
     CU_ASSERT_TRUE(path0_count >= 45 && path0_count <= 55);
 
     wlb_test_teardown(&f);
@@ -1080,13 +1099,13 @@ xqc_test_wlb_idle_path_goodput_decays(void)
     wlb_test_clock_advance(1000000);
     wlb_test_record_delivery(&f, 0, 1024 * 1024);
     wlb_test_record_delivery(&f, 1, 1024 * 1024);
-    (void)wlb_test_count_stream_path(&f, 0, 100); /* absorb one round */
+    (void)wlb_test_count_unpinned_path(&f, 0, 100); /* absorb one round */
 
     int path0_count = 0;
     for (int round = 0; round < 6; round++) {
         wlb_test_clock_advance(1000000);
         wlb_test_record_delivery(&f, 0, 1024 * 1024);
-        path0_count = wlb_test_count_stream_path(&f, 0, 100);
+        path0_count = wlb_test_count_unpinned_path(&f, 0, 100);
     }
     CU_ASSERT_TRUE(path0_count >= 80);
 
@@ -1113,15 +1132,15 @@ xqc_test_wlb_warmed_zero_goodput_ignores_stale_estimate(void)
     wlb_test_clock_advance(1000000);
     wlb_test_record_delivery(&f, 0, 1024 * 1024);
     wlb_test_record_delivery(&f, 1, 1024 * 1024);
-    (void)wlb_test_count_stream_path(&f, 0, 100);
+    (void)wlb_test_count_unpinned_path(&f, 0, 100);
 
     for (int round = 0; round < 120; round++) {
         wlb_test_clock_advance(1000000);
         wlb_test_record_delivery(&f, 0, 1024 * 1024);
-        (void)wlb_test_count_stream_path(&f, 0, 100);
+        (void)wlb_test_count_unpinned_path(&f, 0, 100);
     }
 
-    int silent_path_count = wlb_test_count_stream_path(&f, 1, 100);
+    int silent_path_count = wlb_test_count_unpinned_path(&f, 1, 100);
     CU_ASSERT_TRUE(silent_path_count >= 5 && silent_path_count <= 6);
 
     wlb_test_teardown(&f);
@@ -1141,7 +1160,7 @@ xqc_test_wlb_equal_goodput_is_balanced(void)
     wlb_test_record_delivery(&f, 0, 1024 * 1024);
     wlb_test_record_delivery(&f, 1, 1024 * 1024);
 
-    int path0_count = wlb_test_count_stream_path(&f, 0, 100);
+    int path0_count = wlb_test_count_unpinned_path(&f, 0, 100);
     CU_ASSERT_TRUE(path0_count >= 45 && path0_count <= 55);
 
     wlb_test_teardown(&f);
@@ -1172,7 +1191,7 @@ xqc_test_wlb_bloated_path_sheds_weight(void)
     wlb_test_record_delivery(&f, 0, 1024 * 1024);
     wlb_test_record_delivery(&f, 1, 1024 * 1024);
 
-    int path0_count = wlb_test_count_stream_path(&f, 0, 100);
+    int path0_count = wlb_test_count_unpinned_path(&f, 0, 100);
     CU_ASSERT_TRUE(path0_count >= 80);
 
     wlb_test_teardown(&f);
@@ -1192,7 +1211,7 @@ xqc_test_wlb_four_to_one_goodput_after_acked_warmup(void)
     wlb_test_record_delivery(&f, 0, 4 * 1024 * 1024);
     wlb_test_record_delivery(&f, 1, 1024 * 1024);
 
-    int path0_count = wlb_test_count_stream_path(&f, 0, 100);
+    int path0_count = wlb_test_count_unpinned_path(&f, 0, 100);
     CU_ASSERT_TRUE(path0_count >= 75 && path0_count <= 85);
 
     wlb_test_teardown(&f);
@@ -1209,7 +1228,7 @@ xqc_test_wlb_new_path_gets_warmup_floor(void)
 
     wlb_test_clock_advance(1000000);
     wlb_test_record_delivery(&f, 0, 64 * 1024 * 1024);
-    (void)wlb_test_invoke_stream(&f);
+    (void)wlb_test_invoke_unpinned(&f);
 
     xqc_wlb_path_stats_t stats[2];
     size_t n = 0;
@@ -1220,14 +1239,14 @@ xqc_test_wlb_new_path_gets_warmup_floor(void)
     CU_ASSERT_EQUAL(stats[0].warmup, 0);
 
     wlb_test_add_path(&f, 1, 25000, 1024, 0);
-    (void)wlb_test_invoke_stream(&f);
+    (void)wlb_test_invoke_unpinned(&f);
     CU_ASSERT_EQUAL(xqc_wlb_scheduler_copy_path_stats(
                         f.scheduler, stats, 2, &n),
                     XQC_OK);
     CU_ASSERT_EQUAL(n, 2);
     CU_ASSERT_EQUAL(stats[1].warmup, 1);
 
-    int new_path_count = wlb_test_count_stream_path(&f, 1, 100);
+    int new_path_count = wlb_test_count_unpinned_path(&f, 1, 100);
     CU_ASSERT_TRUE(new_path_count >= 20);
 
     wlb_test_teardown(&f);
@@ -1247,7 +1266,7 @@ xqc_test_wlb_steady_path_gets_exploration_floor(void)
     wlb_test_record_delivery(&f, 0, 64 * 1024 * 1024);
     wlb_test_record_delivery(&f, 1, 1024 * 1024);
 
-    int slow_path_count = wlb_test_count_stream_path(&f, 1, 100);
+    int slow_path_count = wlb_test_count_unpinned_path(&f, 1, 100);
     CU_ASSERT_TRUE(slow_path_count >= 5);
 
     wlb_test_teardown(&f);
@@ -1268,13 +1287,13 @@ xqc_test_wlb_active_time_ends_warmup(void)
     wlb_test_record_delivery(&f, 1, 100 * 1024);
     for (int i = 0; i < 31; i++) {
         wlb_test_clock_advance(100000);
-        (void)wlb_test_invoke_stream(&f);
+        (void)wlb_test_invoke_unpinned(&f);
     }
     for (int i = 31; i < 100; i++) {
-        (void)wlb_test_invoke_stream(&f);
+        (void)wlb_test_invoke_unpinned(&f);
     }
 
-    int path0_count = wlb_test_count_stream_path(&f, 0, 100);
+    int path0_count = wlb_test_count_unpinned_path(&f, 0, 100);
     CU_ASSERT_TRUE(path0_count >= 75 && path0_count <= 85);
 
     wlb_test_teardown(&f);
@@ -1294,7 +1313,7 @@ xqc_test_wlb_idle_time_does_not_end_warmup(void)
     wlb_test_record_delivery(&f, 0, 400 * 1024);
     wlb_test_record_delivery(&f, 1, 100 * 1024);
 
-    int slow_path_count = wlb_test_count_stream_path(&f, 1, 100);
+    int slow_path_count = wlb_test_count_unpinned_path(&f, 1, 100);
     CU_ASSERT_TRUE(slow_path_count >= 27);
 
     wlb_test_teardown(&f);
@@ -1312,7 +1331,7 @@ xqc_test_wlb_path_stats_snapshot(void)
     wlb_test_clock_advance(1000000);
     wlb_test_record_delivery(&f, 0, 1024 * 1024);
     wlb_test_record_delivery(&f, 1, 1024 * 1024);
-    (void)wlb_test_invoke_stream(&f);
+    (void)wlb_test_invoke_unpinned(&f);
 
     xqc_wlb_path_stats_t stats[4];
     memset(stats, 0xA5, sizeof(stats));
@@ -1374,11 +1393,11 @@ xqc_test_wlb_warmup_time_only_credits_selected_path(void)
 
     wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
     wlb_test_add_path(&f, 1, 25000, 64 * 1024, 64 * 1024);
-    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 0);
+    CU_ASSERT_EQUAL(wlb_test_invoke_unpinned(&f), 0);
 
     for (int i = 0; i < 31; i++) {
         wlb_test_clock_advance(100000);
-        CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 0);
+        CU_ASSERT_EQUAL(wlb_test_invoke_unpinned(&f), 0);
     }
 
     xqc_wlb_path_stats_t stats[2];
@@ -1402,12 +1421,12 @@ xqc_test_wlb_topology_refresh_clears_packet_deficit(void)
     wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
     xqc_path_ctx_t *old_path =
         wlb_test_add_path(&f, 1, 25000, 64 * 1024, 0);
-    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 0);
+    CU_ASSERT_EQUAL(wlb_test_invoke_unpinned(&f), 0);
 
     wlb_test_detach_path(old_path);
     wlb_test_add_path(&f, 2, 25000, 64 * 1024, 0);
 
-    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 0);
+    CU_ASSERT_EQUAL(wlb_test_invoke_unpinned(&f), 0);
 
     wlb_test_teardown(&f);
 }
@@ -1446,7 +1465,7 @@ xqc_test_wlb_ewma_uses_exact_seven_eighths_history(void)
     wlb_test_clock_advance(1000000);
     wlb_test_record_delivery(&f, 0, 8 * 1024 * 1024);
     wlb_test_record_delivery(&f, 1, 8 * 1024 * 1024);
-    (void)wlb_test_invoke_stream(&f);
+    (void)wlb_test_invoke_unpinned(&f);
 
     xqc_wlb_path_stats_t stats[2];
     size_t n = 0;
@@ -1456,12 +1475,12 @@ xqc_test_wlb_ewma_uses_exact_seven_eighths_history(void)
     CU_ASSERT_EQUAL(stats[0].goodput_Bps, 1024 * 1024);
 
     for (int i = 0; i < 99; i++) {
-        (void)wlb_test_invoke_stream(&f);
+        (void)wlb_test_invoke_unpinned(&f);
     }
     wlb_test_clock_advance(1000000);
     wlb_test_record_delivery(&f, 0, 8 * 1024 * 1024);
     wlb_test_record_delivery(&f, 1, 8 * 1024 * 1024);
-    (void)wlb_test_invoke_stream(&f);
+    (void)wlb_test_invoke_unpinned(&f);
 
     CU_ASSERT_EQUAL(xqc_wlb_scheduler_copy_path_stats(
                         f.scheduler, stats, 2, &n),
@@ -1491,7 +1510,7 @@ xqc_test_wlb_loss_above_two_percent_downweights_path(void)
     wlb_test_record_delivery(&f, 0, 8 * 1024 * 1024);
     wlb_test_record_delivery(&f, 1, 8 * 1024 * 1024);
 
-    int path0_count = wlb_test_count_stream_path(&f, 0, 100);
+    int path0_count = wlb_test_count_unpinned_path(&f, 0, 100);
     CU_ASSERT_TRUE(path0_count >= 55 && path0_count <= 65);
 
     wlb_test_teardown(&f);
@@ -1513,7 +1532,7 @@ xqc_test_wlb_control_delivery_does_not_advance_learning(void)
         &f, 0, XQC_FRAME_BIT_PATH_CHALLENGE, 2 * 1024 * 1024, 0);
     wlb_test_record_acked_packet(
         &f, 1, XQC_FRAME_BIT_CRYPTO, 2 * 1024 * 1024, 0);
-    (void)wlb_test_invoke_stream(&f);
+    (void)wlb_test_invoke_unpinned(&f);
 
     xqc_wlb_path_stats_t stats[2];
     size_t n = 0;
@@ -1542,7 +1561,7 @@ xqc_test_wlb_application_delivery_advances_learning(void)
     wlb_test_clock_advance(1000000);
     wlb_test_record_stream_delivery(&f, 0, 8 * 1024 * 1024);
     wlb_test_record_generated_datagram_delivery(&f, 1, 1049, 1000);
-    (void)wlb_test_invoke_stream(&f);
+    (void)wlb_test_invoke_unpinned(&f);
 
     xqc_wlb_path_stats_t stats[2];
     size_t n = 0;
@@ -1576,7 +1595,7 @@ xqc_test_wlb_rejected_0rtt_does_not_advance_learning(void)
     rejected.po_path_id = 0;
     rejected.po_dgram_payload_size = 2 * 1024 * 1024;
     xqc_conn_decrease_unacked_stream_ref(&f.conn, &rejected);
-    (void)wlb_test_invoke_stream(&f);
+    (void)wlb_test_invoke_unpinned(&f);
 
     xqc_wlb_path_stats_t stats[2];
     size_t n = 0;
@@ -1610,7 +1629,7 @@ xqc_test_wlb_duplicate_ack_counts_application_once(void)
                                  g_fake_now_us, 1);
     xqc_send_ctl_on_packet_acked(&f.send_ctls[0], &acked,
                                  g_fake_now_us, 1);
-    (void)wlb_test_invoke_stream(&f);
+    (void)wlb_test_invoke_unpinned(&f);
 
     xqc_wlb_path_stats_t stats[2];
     size_t n = 0;
