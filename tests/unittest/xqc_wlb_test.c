@@ -854,6 +854,52 @@ xqc_test_wlb_evicted_path_gets_recovery_probe(void)
     wlb_test_teardown(&f);
 }
 
+/**
+ * The recovery-probe round robin has to survive a candidate it cannot send
+ * on. A blackholed path normally has everything it sent still in flight, so
+ * it is exactly the candidate that fails the cwnd check -- and if the cursor
+ * does not move past it, it holds the rotation and no other evicted path is
+ * ever probed, which is the one thing the round robin exists to prevent.
+ */
+void
+xqc_test_wlb_evicted_probe_rotates_past_blocked_path(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    /* Candidate 0: blackholed AND cwnd-blocked (inflight == cwnd). */
+    xqc_path_ctx_t *blocked = wlb_test_add_path(&f, 1, 25000, 1024, 1024);
+    /* Candidate 1: blackholed but sendable -- this is the one that can heal. */
+    xqc_path_ctx_t *sendable = wlb_test_add_path(&f, 2, 25000, 64 * 1024, 0);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(blocked);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(sendable);
+
+    blocked->path_send_ctl->ctl_pto_count = 3;  /* WLB_PTO_EVICT_THRESH */
+    sendable->path_send_ctl->ctl_pto_count = 3;  /* WLB_PTO_EVICT_THRESH */
+
+    /* First payload packet only arms the interval. */
+    (void)wlb_test_invoke(&f, UINT32_MAX);
+
+    int probed_sendable = 0;
+    for (int round = 0; round < 4; round++) {
+        wlb_test_clock_advance(600000); /* past the probe interval */
+        for (int i = 0; i < 4; i++) {
+            if (wlb_test_invoke(&f, UINT32_MAX) == 2) {
+                probed_sendable++;
+            }
+        }
+    }
+    /* The blocked candidate must not be able to starve this one. */
+    CU_ASSERT_TRUE(probed_sendable > 0);
+
+    /* And the probe is still rate limited: it is a recovery mechanism, not a
+     * second traffic class. Four intervals cannot yield more than four. */
+    CU_ASSERT_TRUE(probed_sendable <= 4);
+
+    wlb_test_teardown(&f);
+}
+
 void
 xqc_test_wlb_evicted_probe_never_carries_unique_stream_data(void)
 {

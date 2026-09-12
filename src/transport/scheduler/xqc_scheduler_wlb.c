@@ -177,6 +177,14 @@ wlb_flow_lookup(xqc_wlb_scheduler_t *s, uint32_t hash)
  * Insert or update a flow→path mapping.
  * Reuses tombstone slots left by eviction.
  * On probe-region exhaustion, overwrites the first slot (LRU-ish eviction).
+ *
+ * A tombstone is remembered but does NOT end the search: this flow's own
+ * entry may sit further along the probe chain, behind an eviction that
+ * happened after it was placed. Writing into the tombstone on sight would
+ * leave two live entries for one hash. wlb_flow_expire and the fast-path
+ * eviction both act on a single entry, so the copy they do not reach stays
+ * behind and a later lookup — which stops at the first match — resurrects
+ * whichever pin it names, possibly one already abandoned.
  */
 static void
 wlb_flow_insert(xqc_wlb_scheduler_t *s, uint32_t hash, uint64_t path_id, uint64_t now_us)
@@ -185,20 +193,33 @@ wlb_flow_insert(xqc_wlb_scheduler_t *s, uint32_t hash, uint64_t path_id, uint64_
         return;
     }
     uint32_t idx = hash & WLB_FLOW_TABLE_MASK;
+    wlb_flow_entry_t *slot = NULL;
     for (int i = 0; i < WLB_MAX_PROBE; i++) {
         wlb_flow_entry_t *e = &s->flows[(idx + i) & WLB_FLOW_TABLE_MASK];
-        if (e->hash == 0 || e->hash == WLB_FLOW_TOMBSTONE || e->hash == hash) {
-            e->hash    = hash;
-            e->path_id = path_id;
-            e->last_ts = now_us;
-            return;
+        if (e->hash == hash) {
+            slot = e;               /* the live entry always wins */
+            break;
+        }
+        if (e->hash == WLB_FLOW_TOMBSTONE) {
+            if (slot == NULL) {
+                slot = e;           /* remember the first, keep probing */
+            }
+            continue;
+        }
+        if (e->hash == 0) {
+            if (slot == NULL) {
+                slot = e;           /* end of chain, nothing to reuse */
+            }
+            break;                  /* lookup stops here too, so no entry is past it */
         }
     }
-    /* Probe region full — overwrite first slot */
-    wlb_flow_entry_t *e = &s->flows[idx];
-    e->hash    = hash;
-    e->path_id = path_id;
-    e->last_ts = now_us;
+    if (slot == NULL) {
+        /* Probe region full of other live hashes — overwrite first slot */
+        slot = &s->flows[idx];
+    }
+    slot->hash    = hash;
+    slot->path_id = path_id;
+    slot->last_ts = now_us;
 }
 
 /**
@@ -605,7 +626,13 @@ wlb_normalize_weights(xqc_wlb_scheduler_t *s, uint64_t *raw_weights)
         int base = WLB_QUANTUM_TOTAL / s->n_paths;
         int remainder = WLB_QUANTUM_TOTAL % s->n_paths;
         for (int i = 0; i < s->n_paths; i++) {
-            s->paths[i].weight = base + (i < remainder ? 1 : 0);
+            uint64_t quantum = (uint64_t)base + (i < remainder ? 1 : 0);
+            /* Past WLB_QUANTUM_TOTAL paths integer division hands out zero,
+             * and a zero weight never accrues deficit: the path would be
+             * excluded from payload and from pinning for the life of the
+             * connection, so it could never leave warm-up either. Keep the
+             * documented [1, WLB_QUANTUM_TOTAL] range instead. */
+            s->paths[i].weight = quantum > 0 ? quantum : 1;
         }
         return;
     }
@@ -1009,6 +1036,13 @@ wlb_pick_evicted_probe(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
     if (check_cwnd
         && !xqc_scheduler_check_path_can_send(probe, packet_out, check_cwnd))
     {
+        /* Step the cursor anyway. A blackholed path still has everything it
+         * sent in flight, so it is precisely the candidate that stays
+         * cwnd-blocked; leaving the cursor parked on it would hold the
+         * rotation forever and starve every other evicted path's probe --
+         * the opposite of what the round-robin above promises. The interval
+         * is deliberately not consumed: no probe was sent. */
+        s->next_evicted_probe_path++;
         return NULL;
     }
     s->next_evicted_probe_path++;
@@ -1124,20 +1158,24 @@ xqc_wlb_scheduler_get_path(void *scheduler,
         if (entry) {
             xqc_path_ctx_t *path = wlb_find_path_ctx(conn, entry->path_id);
 
-            /* PTO-based eviction: if the pinned path has been unresponsive
-             * for several consecutive PTOs, the path is likely dead (e.g.
-             * link down where sendto still succeeds but packets are silently
-             * dropped).  Evict the flow so it gets re-pinned to a live path
-             * via WRR below. */
-            if (path
-                && path->path_send_ctl->ctl_pto_count >= WLB_PTO_EVICT_THRESH)
-            {
+            /* Drop a pin whose path can no longer carry payload -- removed,
+             * frozen, socket error, or unresponsive for several consecutive
+             * PTOs (link down where sendto still succeeds but packets are
+             * silently dropped). wlb_find_path_ctx already filters all four
+             * through wlb_path_schedulable, so NULL is the signal; testing
+             * ctl_pto_count on the returned path instead could never fire,
+             * because a blackholed path never comes back from that lookup.
+             * Tombstoning here rather than waiting for the once-a-second
+             * wlb_flow_expire sweep matters when the failure leaves a single
+             * usable path: that branch returns before reaching the re-pin
+             * below, so the stale entry would otherwise survive, and a path
+             * that heals within the same second would be pinned straight
+             * back with no recovery grace. */
+            if (path == NULL) {
                 xqc_log(conn->log, XQC_LOG_INFO,
-                        "|wlb|flow_evict|reason:pto|flow:%ui|path:%ui|pto:%ud|",
-                        packet_out->po_flow_hash, path->path_id,
-                        path->path_send_ctl->ctl_pto_count);
+                        "|wlb|flow_evict|reason:unusable|flow:%ui|path:%ui|",
+                        packet_out->po_flow_hash, entry->path_id);
                 entry->hash = WLB_FLOW_TOMBSTONE;
-                path = NULL;
             }
 
             if (path && xqc_scheduler_check_path_can_send(path, packet_out, check_cwnd)) {
