@@ -73,6 +73,8 @@ main(void)
                                xqc_test_wlb_warmed_zero_goodput_ignores_stale_estimate)
         || NULL == CU_add_test(s, "equal_goodput_is_balanced",
                                xqc_test_wlb_equal_goodput_is_balanced)
+        || NULL == CU_add_test(s, "bloated_path_sheds_weight",
+                               xqc_test_wlb_bloated_path_sheds_weight)
         || NULL == CU_add_test(s, "four_to_one_goodput_after_acked_warmup",
                                xqc_test_wlb_four_to_one_goodput_after_acked_warmup)
         || NULL == CU_add_test(s, "new_path_gets_warmup_floor",

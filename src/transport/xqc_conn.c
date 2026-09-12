@@ -7076,15 +7076,14 @@ xqc_conn_get_queue_fin_timeout(xqc_connection_t *conn)
 }
 
 void
-xqc_conn_decrease_unacked_stream_ref(xqc_connection_t *conn,
-                                      xqc_packet_out_t *packet_out)
+xqc_conn_decrease_unacked_stream_ref(xqc_connection_t *conn, xqc_packet_out_t *packet_out)
 {
-    int first_time_ack = !packet_out->po_acked;
-    if (packet_out->po_origin) {
-        first_time_ack = first_time_ack && !packet_out->po_origin->po_acked;
-    }
-
+    int first_time_ack = 1;
     if (packet_out->po_flag & XQC_POF_STREAM_UNACK) {
+        first_time_ack = first_time_ack && (!packet_out->po_acked);
+        if (packet_out->po_origin) {
+            first_time_ack = first_time_ack && (!packet_out->po_origin->po_acked);
+        }
         if (first_time_ack) {
             xqc_stream_t *stream;
             for (int i = 0; i < XQC_MAX_STREAM_FRAME_IN_PO; i++) {

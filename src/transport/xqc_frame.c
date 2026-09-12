@@ -1568,7 +1568,13 @@ xqc_process_reset_stream_frame(xqc_connection_t *conn, xqc_packet_in_t *packet_i
         conn->conn_flow_ctl.fc_data_read +=
             (int64_t)final_size - (int64_t)stream->stream_data_in.next_read_offset;
         xqc_destroy_frame_list(&stream->stream_data_in.frames_tailq);
+        /* Both counters feed the reassembly density gate, so they have to be
+         * cleared together. Nothing reaches that gate on this stream again
+         * (xqc_process_stream_frame returns early once the recv state is
+         * RESET_RECVD), but a stale byte count would relax the gate if that
+         * early return is ever narrowed. */
         stream->stream_data_in.buffered_frame_count = 0;
+        stream->stream_data_in.buffered_data_bytes = 0;
         xqc_stream_ready_to_read(stream);
     }
     return XQC_OK;

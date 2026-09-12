@@ -109,7 +109,6 @@ typedef struct {
     uint64_t    prior_delivered;
     uint64_t    prior_delivered_time_us;
     uint64_t    app_delivered;
-    uint64_t    app_delivered_time_us;
     uint64_t    goodput_ewma_Bps;
     uint64_t    warmup_acked_bytes;
     uint64_t    warmup_active_us;
@@ -933,7 +932,6 @@ xqc_wlb_scheduler_on_app_packet_acked(void *scheduler, uint64_t path_id,
         } else {
             s->paths[i].app_delivered += payload_bytes;
         }
-        s->paths[i].app_delivered_time_us = ack_time_us;
         break;
     }
 }
