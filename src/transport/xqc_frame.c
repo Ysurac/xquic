@@ -147,9 +147,15 @@ xqc_insert_stream_frame(xqc_connection_t *conn, xqc_stream_t *stream,
          * drops the average below the minimum. Nothing changes on rejection,
          * so the retransmission is refused forever and the stream livelocks.
          * Charging the density budget at count_after keeps the exemption
-         * coherent across both tiers; it cannot be farmed, because only a
-         * prefix-extender gets it and every admitted prefix-extender advances
-         * merged_offset_end. */
+         * coherent across both tiers. It is reusable but not farmable, and
+         * not because a prefix-extender advances merged_offset_end -- that
+         * makes data readable but reclaims nothing; only xqc_stream_recv()
+         * decrements these counters. Two bounds hold with no application
+         * drain at all. Admission under the density tier requires
+         * B + L >= C*m, so after insertion B' >= (C' - 1)*m: the average can
+         * sit one reserved node below the minimum and no lower, however many
+         * prefix frames arrive. And a prefix-extender still needs
+         * count_after < hard_cap, so the node count stops at hard_cap. */
         uint64_t count_after = buffered_count + (extends_prefix ? 0 : 1);
 
         xqc_bool_t hard_limit = count_after >= hard_cap;

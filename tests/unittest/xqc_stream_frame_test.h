@@ -15,6 +15,7 @@ void  xqc_test_stream_frame_fin_rejected_then_retransmitted();
 void  xqc_test_stream_frame_cap_liveness_real();
 void  xqc_test_stream_frame_dense_buffer_budget();
 void  xqc_test_stream_frame_dense_prefix_liveness();
+void  xqc_test_stream_frame_prefix_respects_hard_cap();
 void  xqc_test_stream_frame_fin_repair_skips_discarded();
 void  xqc_test_stream_frame_cap_setting();
 
