@@ -24,7 +24,6 @@
 #include "xquic/xquic.h"
 #include "xquic/xquic_typedef.h"
 #include "src/transport/xqc_conn.h"
-#include "src/transport/xqc_engine.h"
 #include "src/transport/xqc_multipath.h"
 #include "src/transport/xqc_packet_out.h"
 #include "src/transport/xqc_send_ctl.h"
@@ -33,14 +32,9 @@
 #include "src/transport/xqc_frame_parser.h"
 #include "src/transport/scheduler/xqc_scheduler_wlb.h"
 #include "src/common/xqc_log.h"
-#include "src/common/xqc_siphash.h"
 #include "src/common/xqc_time.h"
 
 #include "xqc_wlb_test.h"
-
-xqc_str_hash_table_t *xqc_engine_conns_hash_create(
-    xqc_config_t *config, uint8_t *key, size_t key_len, xqc_log_t *log);
-void xqc_engine_conns_hash_destroy(xqc_str_hash_table_t *hash_table);
 
 /* ───────────────────────── fake clock ───────────────────────── */
 
@@ -100,12 +94,6 @@ typedef struct {
     /* scheduler state — opaque heap blob sized by xqc_scheduler_size */
     void                 *scheduler;
 
-    /* Minimal engine/SCID registration for the public policy/stat APIs. */
-    xqc_engine_t          engine;
-    xqc_config_t          config;
-    xqc_cid_t             scid;
-    xqc_bool_t            engine_hash_initialized;
-
     /* saved global clock pointer so we can restore on teardown */
     xqc_timestamp_pt      saved_monotonic_ts;
 } wlb_test_fixture_t;
@@ -139,39 +127,10 @@ static void
 wlb_test_teardown(wlb_test_fixture_t *f)
 {
     xqc_monotonic_timestamp = f->saved_monotonic_ts;
-    if (f->engine_hash_initialized) {
-        xqc_engine_conns_hash_destroy(f->engine.conns_hash);
-        f->engine.conns_hash = NULL;
-        f->engine_hash_initialized = XQC_FALSE;
-    }
     if (f->scheduler) {
         free(f->scheduler);
         f->scheduler = NULL;
     }
-}
-
-static void
-wlb_test_register_scid(wlb_test_fixture_t *f)
-{
-    static uint8_t siphash_key[XQC_SIPHASH_KEY_SIZE] = {
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
-    };
-
-    f->config.conns_hash_bucket_size = 16;
-    f->config.hash_conflict_threshold = 4;
-    f->engine.config = &f->config;
-    f->engine.log = &f->log;
-    f->engine.conns_hash = xqc_engine_conns_hash_create(
-        &f->config, siphash_key, sizeof(siphash_key), &f->log);
-    CU_ASSERT_PTR_NOT_NULL_FATAL(f->engine.conns_hash);
-    f->engine_hash_initialized = XQC_TRUE;
-
-    f->scid.cid_len = 8;
-    memcpy(f->scid.cid_buf, "wlb-test", f->scid.cid_len);
-    CU_ASSERT_EQUAL_FATAL(xqc_insert_conns_hash(
-                              f->engine.conns_hash, &f->conn,
-                              f->scid.cid_buf, f->scid.cid_len),
-                          XQC_OK);
 }
 
 /* Attach a new path to the connection. Defaults the path to ACTIVE with the
@@ -1296,23 +1255,6 @@ xqc_test_wlb_idle_time_does_not_end_warmup(void)
 }
 
 void
-xqc_test_wlb_latency_policy_uses_minrtt(void)
-{
-    wlb_test_fixture_t f;
-    wlb_test_setup(&f);
-
-    wlb_test_add_path(&f, 0, 50000, 64 * 1024, 0);
-    wlb_test_add_path(&f, 1, 10000, 64 * 1024, 0);
-    CU_ASSERT_EQUAL(xqc_wlb_scheduler_set_policy(
-                        f.scheduler, &f.conn, XQC_WLB_LOW_LATENCY),
-                    XQC_OK);
-
-    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 1);
-
-    wlb_test_teardown(&f);
-}
-
-void
 xqc_test_wlb_path_stats_snapshot(void)
 {
     wlb_test_fixture_t f;
@@ -1327,14 +1269,24 @@ xqc_test_wlb_path_stats_snapshot(void)
     (void)wlb_test_invoke_stream(&f);
 
     xqc_wlb_path_stats_t stats[4];
+    memset(stats, 0xA5, sizeof(stats));
     size_t n = 0;
     CU_ASSERT_EQUAL(xqc_wlb_scheduler_copy_path_stats(f.scheduler, stats, 4, &n),
                     XQC_OK);
     CU_ASSERT_EQUAL(n, 2);
-    CU_ASSERT_EQUAL(stats[0].policy, XQC_WLB_MAX_THROUGHPUT);
     CU_ASSERT_TRUE(stats[0].weight_pct + stats[1].weight_pct >= 100);
     CU_ASSERT_EQUAL(xqc_wlb_scheduler_copy_path_stats(NULL, stats, 4, &n),
                     -XQC_EPARAM);
+
+    /* Truncation: report the full count, write only what fits, leave the
+     * caller's remaining slots untouched. */
+    memset(stats, 0xA5, sizeof(stats));
+    n = 0;
+    CU_ASSERT_EQUAL(xqc_wlb_scheduler_copy_path_stats(f.scheduler, stats, 1, &n),
+                    XQC_OK);
+    CU_ASSERT_EQUAL(n, 2);
+    CU_ASSERT_EQUAL(stats[0].path_id, 0);
+    CU_ASSERT_EQUAL(stats[1].path_id, UINT64_C(0xA5A5A5A5A5A5A5A5));
 
     wlb_test_teardown(&f);
 }
@@ -1390,53 +1342,6 @@ xqc_test_wlb_warmup_time_only_credits_selected_path(void)
                     XQC_OK);
     CU_ASSERT_EQUAL(n, 2);
     CU_ASSERT_EQUAL(stats[0].warmup, 0);
-    CU_ASSERT_EQUAL(stats[1].warmup, 1);
-
-    wlb_test_teardown(&f);
-}
-
-void
-xqc_test_wlb_throughput_policy_resets_delivery_learning(void)
-{
-    wlb_test_fixture_t f;
-    wlb_test_setup(&f);
-
-    wlb_test_add_path(&f, 0, 50000, 64 * 1024, 0);
-    wlb_test_add_path(&f, 1, 10000, 64 * 1024, 0);
-    wlb_test_drain_initial_round(&f);
-    wlb_test_clock_advance(1000000);
-    wlb_test_record_delivery(&f, 0, 8 * 1024 * 1024);
-    wlb_test_record_delivery(&f, 1, 8 * 1024 * 1024);
-    (void)wlb_test_invoke_stream(&f);
-
-    xqc_wlb_path_stats_t stats[2];
-    size_t n = 0;
-    CU_ASSERT_EQUAL(xqc_wlb_scheduler_copy_path_stats(
-                        f.scheduler, stats, 2, &n),
-                    XQC_OK);
-    CU_ASSERT_EQUAL(stats[0].goodput_Bps, 1024 * 1024);
-    CU_ASSERT_EQUAL(xqc_wlb_scheduler_set_policy(
-                        f.scheduler, &f.conn, XQC_WLB_LOW_LATENCY),
-                    XQC_OK);
-
-    wlb_test_clock_advance(1000000);
-    wlb_test_record_delivery(&f, 0, 16 * 1024 * 1024);
-    wlb_test_record_delivery(&f, 1, 4 * 1024 * 1024);
-    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 1);
-
-    CU_ASSERT_EQUAL(xqc_wlb_scheduler_set_policy(
-                        f.scheduler, &f.conn,
-                        XQC_WLB_MAX_THROUGHPUT),
-                    XQC_OK);
-    (void)wlb_test_invoke_stream(&f);
-
-    CU_ASSERT_EQUAL(xqc_wlb_scheduler_copy_path_stats(
-                        f.scheduler, stats, 2, &n),
-                    XQC_OK);
-    CU_ASSERT_EQUAL(n, 2);
-    CU_ASSERT_EQUAL(stats[0].goodput_Bps, 0);
-    CU_ASSERT_EQUAL(stats[1].goodput_Bps, 0);
-    CU_ASSERT_EQUAL(stats[0].warmup, 1);
     CU_ASSERT_EQUAL(stats[1].warmup, 1);
 
     wlb_test_teardown(&f);
@@ -1547,42 +1452,6 @@ xqc_test_wlb_loss_above_two_percent_downweights_path(void)
 }
 
 void
-xqc_test_wlb_public_scid_policy_and_truncated_stats(void)
-{
-    wlb_test_fixture_t f;
-    wlb_test_setup(&f);
-    wlb_test_register_scid(&f);
-
-    wlb_test_add_path(&f, 0, 50000, 64 * 1024, 0);
-    wlb_test_add_path(&f, 1, 10000, 64 * 1024, 0);
-    (void)wlb_test_invoke_stream(&f);
-
-    CU_ASSERT_EQUAL(xqc_conn_set_wlb_policy(
-                        &f.engine, &f.scid, XQC_WLB_LOW_LATENCY),
-                    XQC_OK);
-    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 1);
-
-    xqc_wlb_path_stats_t stats[2];
-    memset(stats, 0xA5, sizeof(stats));
-    size_t n = 0;
-    CU_ASSERT_EQUAL(xqc_conn_get_wlb_path_stats(
-                        &f.engine, &f.scid, stats, 1, &n),
-                    XQC_OK);
-    CU_ASSERT_EQUAL(n, 2);
-    CU_ASSERT_EQUAL(stats[0].path_id, 0);
-    CU_ASSERT_EQUAL(stats[0].policy, XQC_WLB_LOW_LATENCY);
-    CU_ASSERT_EQUAL(stats[1].path_id, UINT64_C(0xA5A5A5A5A5A5A5A5));
-
-    xqc_cid_t missing = f.scid;
-    missing.cid_buf[0] ^= 0xFF;
-    CU_ASSERT_EQUAL(xqc_conn_set_wlb_policy(
-                        &f.engine, &missing, XQC_WLB_MAX_THROUGHPUT),
-                    -XQC_ECONN_NFOUND);
-
-    wlb_test_teardown(&f);
-}
-
-void
 xqc_test_wlb_control_delivery_does_not_advance_learning(void)
 {
     wlb_test_fixture_t f;
@@ -1639,74 +1508,6 @@ xqc_test_wlb_application_delivery_advances_learning(void)
     CU_ASSERT_EQUAL(stats[1].goodput_Bps, 1049000 / 8);
     CU_ASSERT_EQUAL(stats[0].warmup, 0);
     CU_ASSERT_EQUAL(stats[1].warmup, 0);
-
-    wlb_test_teardown(&f);
-}
-
-void
-xqc_test_wlb_latency_policy_populates_stats_before_payload(void)
-{
-    wlb_test_fixture_t f;
-    wlb_test_setup(&f);
-    wlb_test_register_scid(&f);
-
-    wlb_test_add_path(&f, 0, 50000, 64 * 1024, 0);
-    wlb_test_add_path(&f, 1, 10000, 64 * 1024, 0);
-    CU_ASSERT_EQUAL(xqc_conn_set_wlb_policy(
-                        &f.engine, &f.scid, XQC_WLB_LOW_LATENCY),
-                    XQC_OK);
-
-    xqc_wlb_path_stats_t stats[2];
-    size_t n = 0;
-    CU_ASSERT_EQUAL(xqc_conn_get_wlb_path_stats(
-                        &f.engine, &f.scid, stats, 2, &n),
-                    XQC_OK);
-    CU_ASSERT_EQUAL(n, 2);
-    if (n == 2) {
-        CU_ASSERT_EQUAL(stats[0].path_id, 0);
-        CU_ASSERT_EQUAL(stats[1].path_id, 1);
-        CU_ASSERT_EQUAL(stats[0].policy, XQC_WLB_LOW_LATENCY);
-        CU_ASSERT_EQUAL(stats[1].policy, XQC_WLB_LOW_LATENCY);
-        CU_ASSERT_EQUAL(stats[0].goodput_Bps, 0);
-        CU_ASSERT_EQUAL(stats[1].goodput_Bps, 0);
-    }
-    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 1);
-
-    wlb_test_teardown(&f);
-}
-
-void
-xqc_test_wlb_latency_policy_syncs_path_add_remove(void)
-{
-    wlb_test_fixture_t f;
-    wlb_test_setup(&f);
-    wlb_test_register_scid(&f);
-
-    wlb_test_add_path(&f, 0, 50000, 64 * 1024, 0);
-    xqc_path_ctx_t *old_path =
-        wlb_test_add_path(&f, 1, 10000, 64 * 1024, 0);
-    CU_ASSERT_EQUAL(xqc_conn_set_wlb_policy(
-                        &f.engine, &f.scid, XQC_WLB_LOW_LATENCY),
-                    XQC_OK);
-
-    wlb_test_clock_advance(1000000);
-    wlb_test_record_delivery(&f, 0, 2 * 1024 * 1024);
-    wlb_test_detach_path(old_path);
-    wlb_test_add_path(&f, 2, 5000, 64 * 1024, 0);
-
-    xqc_wlb_path_stats_t stats[2];
-    size_t n = 0;
-    CU_ASSERT_EQUAL(xqc_conn_get_wlb_path_stats(
-                        &f.engine, &f.scid, stats, 2, &n),
-                    XQC_OK);
-    CU_ASSERT_EQUAL(n, 2);
-    if (n == 2) {
-        CU_ASSERT_EQUAL(stats[0].path_id, 0);
-        CU_ASSERT_EQUAL(stats[1].path_id, 2);
-        CU_ASSERT_EQUAL(stats[0].goodput_Bps, 0);
-        CU_ASSERT_EQUAL(stats[0].warmup, 1);
-    }
-    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 2);
 
     wlb_test_teardown(&f);
 }

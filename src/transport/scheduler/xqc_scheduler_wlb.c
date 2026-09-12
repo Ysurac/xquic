@@ -44,7 +44,6 @@
 #include "src/transport/scheduler/xqc_scheduler_wlb.h"
 #include "src/transport/scheduler/xqc_scheduler_common.h"
 #include "src/transport/xqc_send_ctl.h"
-#include "src/transport/xqc_engine.h"
 #include "src/transport/xqc_multipath.h"
 #include "src/common/xqc_time.h"
 
@@ -131,7 +130,6 @@ typedef struct {
     int                  force_refresh_paths; /* refresh WRR cache on recovery */
     uint64_t             recovery_unpin_until_us; /* temporarily disable TCP pinning after recovery */
     uint64_t             recovery_prefer_path_id; /* newly recovered path to prefer for first re-pin */
-    xqc_wlb_policy_t     policy;
     uint64_t             last_evicted_probe_us;
     uint64_t             next_evicted_probe_path; /* round-robin cursor */
     /* Set once a previously-healthy path has been observed as unhealthy. Gates
@@ -672,8 +670,7 @@ wlb_note_payload_activity(xqc_wlb_scheduler_t *s, uint64_t path_id,
  * Delivery learning is preserved by path ID; scheduling deficits are reset.
  */
 static void
-wlb_rebuild_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
-                  xqc_bool_t sample_delivery)
+wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
 {
     xqc_list_head_t *pos, *next;
     xqc_path_ctx_t  *path;
@@ -717,51 +714,16 @@ wlb_rebuild_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
         entry.deficit = 0;
         entry.pin_deficit = 0;
         s->paths[n] = entry;
-        if (sample_delivery) {
-            raw_weights[n] =
-                wlb_compute_goodput_weight(&s->paths[n], path, now_us);
-        }
+        raw_weights[n] = wlb_compute_goodput_weight(&s->paths[n], path, now_us);
         n++;
     }
     s->n_paths = n;
-    if (sample_delivery && n > 0) {
+    if (n > 0) {
         wlb_normalize_weights(s, raw_weights);
-    }
-    if (!sample_delivery) {
-        s->round_remaining = 0;
     }
 
     if (old != NULL) {
         xqc_free(old);
-    }
-}
-
-static void
-wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
-{
-    wlb_rebuild_paths(s, conn, XQC_TRUE);
-}
-
-static void
-wlb_sync_paths_for_status(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
-{
-    wlb_rebuild_paths(s, conn, XQC_FALSE);
-}
-
-void
-xqc_wlb_scheduler_sync_path_stats(void *scheduler, xqc_connection_t *conn)
-{
-    if (scheduler == NULL || conn == NULL) {
-        return;
-    }
-
-    xqc_wlb_scheduler_t *s = scheduler;
-    if (s->policy == XQC_WLB_LOW_LATENCY
-        && (s->force_refresh_paths
-            || !wlb_active_paths_match_cache(s, conn)))
-    {
-        wlb_sync_paths_for_status(s, conn);
-        s->force_refresh_paths = 0;
     }
 }
 
@@ -949,41 +911,7 @@ xqc_wlb_scheduler_init(void *scheduler, xqc_log_t *log, xqc_scheduler_params_t *
     xqc_wlb_scheduler_t *s = (xqc_wlb_scheduler_t *)scheduler;
     memset(s, 0, sizeof(*s));
     s->log = log;
-    s->policy = XQC_WLB_MAX_THROUGHPUT;
     s->recovery_prefer_path_id = WLB_NO_PATH_ID;
-}
-
-int
-xqc_wlb_scheduler_set_policy(void *scheduler, xqc_connection_t *conn,
-                             xqc_wlb_policy_t policy)
-{
-    if (scheduler == NULL || conn == NULL
-        || (policy != XQC_WLB_MAX_THROUGHPUT
-            && policy != XQC_WLB_LOW_LATENCY))
-    {
-        return -XQC_EPARAM;
-    }
-
-    xqc_wlb_scheduler_t *s = scheduler;
-    s->policy = policy;
-    s->force_refresh_paths = 1;
-    s->round_remaining = 0;
-    for (int i = 0; i < s->n_paths; i++) {
-        s->paths[i].deficit = 0;
-        s->paths[i].pin_deficit = 0;
-        if (policy == XQC_WLB_MAX_THROUGHPUT) {
-            s->paths[i].warmup = XQC_TRUE;
-            s->paths[i].warmup_acked_bytes = 0;
-            s->paths[i].warmup_active_us = 0;
-            s->paths[i].last_payload_schedule_us = 0;
-            s->paths[i].goodput_ewma_Bps = 0;
-            s->paths[i].prior_delivered = s->paths[i].app_delivered;
-            s->paths[i].prior_delivered_time_us =
-                xqc_monotonic_timestamp();
-        }
-    }
-    xqc_wlb_scheduler_sync_path_stats(scheduler, conn);
-    return XQC_OK;
 }
 
 void
@@ -1032,7 +960,6 @@ xqc_wlb_scheduler_copy_path_stats(void *scheduler, xqc_wlb_path_stats_t *out,
         out[i].goodput_Bps = s->paths[i].goodput_ewma_Bps;
         out[i].weight_pct = (uint8_t)s->paths[i].weight;
         out[i].warmup = s->paths[i].warmup ? 1 : 0;
-        out[i].policy = s->policy;
     }
     return XQC_OK;
 }
@@ -1109,12 +1036,6 @@ xqc_wlb_scheduler_get_path(void *scheduler,
     int check_cwnd, int reinject, xqc_bool_t *cc_blocked)
 {
     xqc_wlb_scheduler_t *s = (xqc_wlb_scheduler_t *)scheduler;
-
-    if (s->policy == XQC_WLB_LOW_LATENCY) {
-        xqc_wlb_scheduler_sync_path_stats(scheduler, conn);
-        return wlb_minrtt_fallback(conn, packet_out, check_cwnd, reinject,
-                                   cc_blocked);
-    }
 
     /* Replicas exist to ride a DIFFERENT path than their origin; flow
      * pinning (ordering protection) is meaningless for a duplicate. Route
@@ -1348,70 +1269,3 @@ const xqc_scheduler_callback_t xqc_wlb_scheduler_cb = {
     .xqc_scheduler_handle_conn_event = xqc_wlb_scheduler_handle_conn_event,
     .xqc_scheduler_on_app_packet_acked = xqc_wlb_scheduler_on_app_packet_acked,
 };
-
-xqc_bool_t
-xqc_wlb_scheduler_is_callback(
-    const xqc_scheduler_callback_t *scheduler_callback)
-{
-    return scheduler_callback != NULL
-           && scheduler_callback->xqc_scheduler_size
-              == xqc_wlb_scheduler_cb.xqc_scheduler_size
-           && scheduler_callback->xqc_scheduler_get_path
-              == xqc_wlb_scheduler_cb.xqc_scheduler_get_path;
-}
-
-/* ================================================================
- *  Public WLB-specific API
- *
- *  These live here rather than in xqc_conn.c so the generic
- *  connection layer needs no knowledge of which scheduler is in
- *  use. They resolve the connection themselves and refuse politely
- *  when it is running some other scheduler.
- * ================================================================ */
-
-int
-xqc_conn_set_wlb_policy(xqc_engine_t *engine, const xqc_cid_t *scid,
-                        xqc_wlb_policy_t policy)
-{
-    if (engine == NULL || scid == NULL
-        || (policy != XQC_WLB_MAX_THROUGHPUT
-            && policy != XQC_WLB_LOW_LATENCY))
-    {
-        return -XQC_EPARAM;
-    }
-
-    xqc_connection_t *conn = xqc_engine_conns_hash_find(engine, scid, 's');
-    if (conn == NULL) {
-        return -XQC_ECONN_NFOUND;
-    }
-    if (!xqc_wlb_scheduler_is_callback(conn->scheduler_callback)) {
-        return -XQC_EPARAM;
-    }
-
-    return xqc_wlb_scheduler_set_policy(conn->scheduler, conn, policy);
-}
-
-int
-xqc_conn_get_wlb_path_stats(xqc_engine_t *engine, const xqc_cid_t *scid,
-                            xqc_wlb_path_stats_t *out, size_t capacity,
-                            size_t *out_count)
-{
-    if (engine == NULL || scid == NULL || out_count == NULL) {
-        return -XQC_EPARAM;
-    }
-    if (capacity > 0 && out == NULL) {
-        return -XQC_EPARAM;
-    }
-
-    xqc_connection_t *conn = xqc_engine_conns_hash_find(engine, scid, 's');
-    if (conn == NULL) {
-        return -XQC_ECONN_NFOUND;
-    }
-    if (!xqc_wlb_scheduler_is_callback(conn->scheduler_callback)) {
-        return -XQC_EPARAM;
-    }
-
-    xqc_wlb_scheduler_sync_path_stats(conn->scheduler, conn);
-    return xqc_wlb_scheduler_copy_path_stats(conn->scheduler, out, capacity,
-                                             out_count);
-}
