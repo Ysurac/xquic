@@ -6,6 +6,7 @@ build/
 build-ios/
 build-macos/
 build-host-tests/
+build-ut/
 build-wlbtest/
 bss/
 *.swp

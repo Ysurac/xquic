@@ -1778,7 +1778,7 @@ xqc_send_ctl_on_packet_acked(xqc_send_ctl_t *send_ctl,
         uint64_t app_payload_bytes = xqc_send_ctl_app_payload_bytes(packet_out);
         if (app_payload_bytes > 0) {
             conn->scheduler_callback->xqc_scheduler_on_app_packet_acked(
-                conn->scheduler, packet_out->po_path_id, app_payload_bytes, now);
+                conn->scheduler, packet_out->po_path_id, app_payload_bytes);
         }
     }
 

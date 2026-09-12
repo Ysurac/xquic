@@ -1107,16 +1107,17 @@ typedef struct xqc_scheduler_callback_s {
     /**
      * Optional. Invoked when a packet carrying application payload (STREAM
      * or DATAGRAM bytes) is confirmed acknowledged for the first time, with
-     * the acknowledged payload byte count, the path it was sent on, and the
-     * ack timestamp. Never invoked with payload_bytes == 0, so a control-only
-     * packet does not reach it. Schedulers that learn per-path goodput
-     * implement this; leave NULL otherwise. Appended last so existing
-     * designated initialisers keep zero-filling it.
+     * the acknowledged payload byte count and the path it was sent on. Never
+     * invoked with payload_bytes == 0, so a control-only packet does not
+     * reach it. Schedulers that learn per-path goodput implement this; leave
+     * NULL otherwise. No ack timestamp is passed: a scheduler that needs one
+     * reads the clock where it consumes the counter, which is what keeps a
+     * sample spanning wall clock rather than the span of an ACK burst.
+     * Appended last so existing designated initialisers keep zero-filling it.
      */
     void (*xqc_scheduler_on_app_packet_acked)(void *scheduler,
                                               uint64_t path_id,
-                                              uint64_t payload_bytes,
-                                              xqc_usec_t ack_time_us);
+                                              uint64_t payload_bytes);
 
 } xqc_scheduler_callback_t;
 
