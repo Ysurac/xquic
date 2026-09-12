@@ -32,7 +32,6 @@
 #include "src/transport/xqc_packet.h"
 #include "src/transport/xqc_fec.h"
 #include "src/transport/xqc_fec_scheme.h"
-#include "src/transport/scheduler/xqc_scheduler_wlb.h"
 #include "src/tls/xqc_tls.h"
 #include "src/tls/xqc_tls_common.h"
 #include <inttypes.h>
@@ -3720,53 +3719,6 @@ xqc_conn_continue_send(xqc_engine_t *engine, const xqc_cid_t *cid)
 
     xqc_conn_continue_send_by_conn(conn);
     return XQC_OK;
-}
-
-int
-xqc_conn_set_wlb_policy(xqc_engine_t *engine, const xqc_cid_t *scid,
-                        xqc_wlb_policy_t policy)
-{
-    if (engine == NULL || scid == NULL
-        || (policy != XQC_WLB_MAX_THROUGHPUT
-            && policy != XQC_WLB_LOW_LATENCY))
-    {
-        return -XQC_EPARAM;
-    }
-
-    xqc_connection_t *conn = xqc_engine_conns_hash_find(engine, scid, 's');
-    if (conn == NULL) {
-        return -XQC_ECONN_NFOUND;
-    }
-    if (!xqc_wlb_scheduler_is_callback(conn->scheduler_callback)) {
-        return -XQC_EPARAM;
-    }
-
-    return xqc_wlb_scheduler_set_policy(conn->scheduler, conn, policy);
-}
-
-int
-xqc_conn_get_wlb_path_stats(xqc_engine_t *engine, const xqc_cid_t *scid,
-                            xqc_wlb_path_stats_t *out, size_t capacity,
-                            size_t *out_count)
-{
-    if (engine == NULL || scid == NULL || out_count == NULL) {
-        return -XQC_EPARAM;
-    }
-    if (capacity > 0 && out == NULL) {
-        return -XQC_EPARAM;
-    }
-
-    xqc_connection_t *conn = xqc_engine_conns_hash_find(engine, scid, 's');
-    if (conn == NULL) {
-        return -XQC_ECONN_NFOUND;
-    }
-    if (!xqc_wlb_scheduler_is_callback(conn->scheduler_callback)) {
-        return -XQC_EPARAM;
-    }
-
-    xqc_wlb_scheduler_sync_path_stats(conn->scheduler, conn);
-    return xqc_wlb_scheduler_copy_path_stats(conn->scheduler, out, capacity,
-                                             out_count);
 }
 
 void

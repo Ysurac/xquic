@@ -25,7 +25,6 @@
 #include "src/transport/xqc_frame_parser.h"
 #include "src/common/utils/vint/xqc_variable_len_int.h"
 #include "src/transport/xqc_transport_params.h"
-#include "src/transport/scheduler/xqc_scheduler_wlb.h"
 
 int 
 xqc_send_ctl_may_remove_unacked_dgram(xqc_connection_t *conn, xqc_packet_out_t *po)
@@ -1733,7 +1732,7 @@ xqc_send_ctl_on_pmtud_ping_acked(xqc_send_ctl_t *send_ctl,
  * OnPacketAcked
  */
 static uint64_t
-xqc_send_ctl_wlb_app_payload_bytes(xqc_packet_out_t *packet_out)
+xqc_send_ctl_app_payload_bytes(xqc_packet_out_t *packet_out)
 {
     uint64_t payload_bytes = 0;
 
@@ -1773,12 +1772,12 @@ xqc_send_ctl_on_packet_acked(xqc_send_ctl_t *send_ctl,
                               && !packet_out->po_origin->po_acked;
     }
     if (first_confirmed_ack
-        && xqc_wlb_scheduler_is_callback(conn->scheduler_callback))
+        && conn->scheduler_callback != NULL
+        && conn->scheduler_callback->xqc_scheduler_on_app_packet_acked)
     {
-        uint64_t payload_bytes =
-            xqc_send_ctl_wlb_app_payload_bytes(packet_out);
-        xqc_wlb_scheduler_on_app_packet_acked(
-            conn->scheduler, packet_out->po_path_id, payload_bytes, now);
+        conn->scheduler_callback->xqc_scheduler_on_app_packet_acked(
+            conn->scheduler, packet_out->po_path_id,
+            xqc_send_ctl_app_payload_bytes(packet_out), now);
     }
 
     if ((conn->conn_type == XQC_CONN_TYPE_SERVER) && (acked_packet->po_frame_types & XQC_FRAME_BIT_HANDSHAKE_DONE)) {

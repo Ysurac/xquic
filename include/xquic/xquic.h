@@ -1109,6 +1109,19 @@ typedef struct xqc_scheduler_callback_s {
                                             xqc_scheduler_conn_event_t event,
                                             void *event_arg);
 
+    /**
+     * Optional. Invoked when a packet carrying application payload (STREAM
+     * or DATAGRAM bytes) is confirmed acknowledged for the first time, with
+     * the acknowledged payload byte count, the path it was sent on, and the
+     * ack timestamp. Schedulers that learn per-path goodput implement this;
+     * leave NULL otherwise. Appended last so existing designated
+     * initialisers keep zero-filling it.
+     */
+    void (*xqc_scheduler_on_app_packet_acked)(void *scheduler,
+                                              uint64_t path_id,
+                                              uint64_t payload_bytes,
+                                              uint64_t ack_time_us);
+
 } xqc_scheduler_callback_t;
 
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_minrtt_scheduler_cb;
