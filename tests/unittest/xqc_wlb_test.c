@@ -368,6 +368,25 @@ wlb_test_count_unpinned_path(wlb_test_fixture_t *f, uint64_t path_id,
     return count;
 }
 
+/* Learned goodput for one path, read back through the stats surface the
+ * tests already use. Returns 0 when the path is not in the WRR cache. */
+static uint64_t
+wlb_test_goodput_of(wlb_test_fixture_t *f, uint64_t path_id)
+{
+    xqc_wlb_path_stats_t stats[WLB_TEST_MAX_PATHS];
+    size_t n = 0;
+    if (xqc_wlb_scheduler_copy_path_stats(f->scheduler, stats,
+                                          WLB_TEST_MAX_PATHS, &n) != XQC_OK) {
+        return 0;
+    }
+    for (size_t i = 0; i < n && i < WLB_TEST_MAX_PATHS; i++) {
+        if (stats[i].path_id == path_id) {
+            return stats[i].goodput_Bps;
+        }
+    }
+    return 0;
+}
+
 /* ───────────────────────── tests ───────────────────────── */
 
 /* I1: asymmetric paths, single TCP flow → pin lands on wide path.
@@ -765,7 +784,10 @@ xqc_test_wlb_stream_data_spills_when_primary_is_full(void)
     wlb_test_add_path(&f, 1, 170000, 1024 * 1024, 0);
 
     CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 0);
-    f.send_ctls[0].ctl_bytes_in_flight = 200;   /* near path now full */
+    /* path_schedule_bytes, not bytes_in_flight: this is the counter the send
+     * pass accumulates as it assigns packets, and it is what makes the spill
+     * happen WITHIN one pass rather than one RTT later. */
+    f.paths[0].path_schedule_bytes = 200;
 
     int on_far = 0;
     for (int i = 0; i < 10; i++) {
@@ -776,14 +798,14 @@ xqc_test_wlb_stream_data_spills_when_primary_is_full(void)
     CU_ASSERT_EQUAL(on_far, 10);
 
     /* And it returns as soon as the near path drains. */
-    f.send_ctls[0].ctl_bytes_in_flight = 0;
+    f.paths[0].path_schedule_bytes = 0;
     CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 0);
 
     wlb_test_teardown(&f);
 }
 
 void
-xqc_test_wlb_stream_path_replacement_refreshes_cache(void)
+xqc_test_wlb_path_replacement_refreshes_cache(void)
 {
     wlb_test_fixture_t f;
     wlb_test_setup(&f);
@@ -920,7 +942,7 @@ xqc_test_wlb_evicted_probe_rotates_past_blocked_path(void)
 }
 
 void
-xqc_test_wlb_evicted_probe_never_carries_unique_stream_data(void)
+xqc_test_wlb_stream_data_never_rides_a_blackholed_path(void)
 {
     wlb_test_fixture_t f;
     wlb_test_setup(&f);
@@ -1315,6 +1337,80 @@ xqc_test_wlb_idle_time_does_not_end_warmup(void)
 
     int slow_path_count = wlb_test_count_unpinned_path(&f, 1, 100);
     CU_ASSERT_TRUE(slow_path_count >= 27);
+
+    wlb_test_teardown(&f);
+}
+
+/**
+ * Measured goodput is demand-limited, not a capacity reading: a path handed
+ * little delivers little, which would keep it handed little. An under-fed
+ * path is app-limited -- it ran out of packets to send, not out of room --
+ * so its weight comes from the controller's bandwidth estimate instead. A
+ * path that WAS handed work and failed to deliver it is not app-limited and
+ * keeps its measured weight.
+ */
+void
+xqc_test_wlb_app_limited_path_is_weighted_by_capacity(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    /* Equal measured delivery, but path 1 has 16x the capacity. */
+    wlb_test_add_path(&f, 0, 25000,  16 * 1024, 0);
+    wlb_test_add_path(&f, 1, 25000, 256 * 1024, 0);
+    wlb_test_drain_initial_round(&f);
+
+    wlb_test_clock_advance(1000000);
+    wlb_test_record_delivery(&f, 0, 64 * 1024);
+    wlb_test_record_delivery(&f, 1, 64 * 1024);
+    f.send_ctls[1].ctl_app_limited = 0;
+    int fed = wlb_test_count_unpinned_path(&f, 1, 100);
+
+    wlb_test_clock_advance(1000000);
+    wlb_test_record_delivery(&f, 0, 64 * 1024);
+    wlb_test_record_delivery(&f, 1, 64 * 1024);
+    f.send_ctls[1].ctl_app_limited = 1;
+    int under_fed = wlb_test_count_unpinned_path(&f, 1, 100);
+
+    CU_ASSERT_TRUE(under_fed > fed);
+
+    wlb_test_teardown(&f);
+}
+
+/**
+ * A goodput sample has to span real wall clock. Timing the inside of an ACK
+ * burst reads a path delivering 1 MiB in 50 ms once a second as a 20 MB/s
+ * path instead of a 1 MB/s one, and that inflated average then out-weighted
+ * the paths doing the actual work.
+ */
+void
+xqc_test_wlb_goodput_sample_ignores_sub_interval_burst(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    wlb_test_add_path(&f, 1, 25000, 64 * 1024, 0);
+    wlb_test_drain_initial_round(&f);
+
+    wlb_test_clock_advance(1000000);
+    wlb_test_record_delivery(&f, 0, 64 * 1024);
+    wlb_test_record_delivery(&f, 1, 64 * 1024);
+    (void)wlb_test_count_unpinned_path(&f, 0, 100);
+    uint64_t settled = wlb_test_goodput_of(&f, 0);
+    CU_ASSERT_TRUE(settled > 0);
+
+    /* A big delivery, then a refresh only 50 ms later: inside the interval,
+     * so nothing may be sampled and the average may not move. */
+    wlb_test_clock_advance(50000);
+    wlb_test_record_delivery(&f, 0, 8 * 1024 * 1024);
+    (void)wlb_test_count_unpinned_path(&f, 0, 100);
+    CU_ASSERT_EQUAL(wlb_test_goodput_of(&f, 0), settled);
+
+    /* Past the interval the same bytes are counted, over their real span. */
+    wlb_test_clock_advance(300000);
+    (void)wlb_test_count_unpinned_path(&f, 0, 100);
+    CU_ASSERT_TRUE(wlb_test_goodput_of(&f, 0) > settled);
 
     wlb_test_teardown(&f);
 }

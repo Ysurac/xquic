@@ -768,7 +768,14 @@ wlb_start_round(xqc_wlb_scheduler_t *s)
     if (s->n_paths == 0) {
         return;
     }
-    s->round_remaining = WLB_QUANTUM_TOTAL;
+    /* A round has to be long enough for every path to be selected once.
+     * Past WLB_QUANTUM_TOTAL paths the quantum split gives each of them
+     * weight 1, so selection is strictly round robin by index -- and a round
+     * that ends at 100 would hand the turn back to wlb_refresh_paths, which
+     * zeroes every deficit. Paths from index WLB_QUANTUM_TOTAL on would then
+     * never be reached, never carry payload, and never leave warm-up. */
+    s->round_remaining = s->n_paths > WLB_QUANTUM_TOTAL
+                         ? s->n_paths : WLB_QUANTUM_TOTAL;
 }
 
 /**

@@ -51,16 +51,16 @@ main(void)
                                xqc_test_wlb_stream_data_prefers_lowest_srtt)
         || NULL == CU_add_test(s, "stream_data_spills_when_primary_is_full",
                                xqc_test_wlb_stream_data_spills_when_primary_is_full)
-        || NULL == CU_add_test(s, "stream_path_replacement_refreshes_cache",
-                               xqc_test_wlb_stream_path_replacement_refreshes_cache)
+        || NULL == CU_add_test(s, "path_replacement_refreshes_cache",
+                               xqc_test_wlb_path_replacement_refreshes_cache)
         || NULL == CU_add_test(s, "control_packets_use_minrtt",
                                xqc_test_wlb_control_packets_use_minrtt)
         || NULL == CU_add_test(s, "evicted_path_gets_recovery_probe",
                                xqc_test_wlb_evicted_path_gets_recovery_probe)
         || NULL == CU_add_test(s, "evicted_probe_rotates_past_blocked_path",
                                xqc_test_wlb_evicted_probe_rotates_past_blocked_path)
-        || NULL == CU_add_test(s, "evicted_probe_never_carries_unique_stream_data",
-                               xqc_test_wlb_evicted_probe_never_carries_unique_stream_data)
+        || NULL == CU_add_test(s, "stream_data_never_rides_a_blackholed_path",
+                               xqc_test_wlb_stream_data_never_rides_a_blackholed_path)
         || NULL == CU_add_test(s, "blackholed_path_does_not_stall_rounds",
                                xqc_test_wlb_blackholed_path_does_not_stall_rounds)
         || NULL == CU_add_test(s, "unpinned_blackhole_refreshes_topology",
@@ -87,6 +87,10 @@ main(void)
                                xqc_test_wlb_active_time_ends_warmup)
         || NULL == CU_add_test(s, "idle_time_does_not_end_warmup",
                                xqc_test_wlb_idle_time_does_not_end_warmup)
+        || NULL == CU_add_test(s, "app_limited_path_is_weighted_by_capacity",
+                               xqc_test_wlb_app_limited_path_is_weighted_by_capacity)
+        || NULL == CU_add_test(s, "goodput_sample_ignores_sub_interval_burst",
+                               xqc_test_wlb_goodput_sample_ignores_sub_interval_burst)
         || NULL == CU_add_test(s, "path_stats_snapshot",
                                xqc_test_wlb_path_stats_snapshot)
         || NULL == CU_add_test(s, "pinned_flow_refreshes_delivery_sample",
