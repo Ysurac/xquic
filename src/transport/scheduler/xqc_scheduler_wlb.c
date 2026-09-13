@@ -768,12 +768,22 @@ wlb_start_round(xqc_wlb_scheduler_t *s)
     if (s->n_paths == 0) {
         return;
     }
-    /* A round has to be long enough for every path to be selected once.
-     * Past WLB_QUANTUM_TOTAL paths the quantum split gives each of them
-     * weight 1, so selection is strictly round robin by index -- and a round
-     * that ends at 100 would hand the turn back to wlb_refresh_paths, which
-     * zeroes every deficit. Paths from index WLB_QUANTUM_TOTAL on would then
-     * never be reached, never carry payload, and never leave warm-up. */
+    /* Past WLB_QUANTUM_TOTAL paths the quantum split gives each of them
+     * weight 1, so selection is round robin by index. A round fixed at
+     * WLB_QUANTUM_TOTAL would then hand the turn back to wlb_refresh_paths,
+     * which zeroes every deficit, and paths from index WLB_QUANTUM_TOTAL on
+     * would never be reached, never carry payload, and never leave warm-up.
+     * Sizing the round to the path count removes that for WRR traffic.
+     *
+     * It does NOT remove it in general: a pinned flow hit, a recovery-prefer
+     * pin and the single-path fast path each spend one round_remaining in
+     * wlb_note_payload_activity without advancing any deficit, so a workload
+     * mixing pinned datagrams with unpinned ones can still end a round
+     * early. Closing that means either not charging pinned hits to the
+     * round, which changes how often weights refresh for every ordinary
+     * 2-4 path connection, or letting deficits survive a routine refresh.
+     * Neither is worth doing for a regime -- more than 100 live paths on one
+     * connection -- that nothing here can reach or test. */
     s->round_remaining = s->n_paths > WLB_QUANTUM_TOTAL
                          ? s->n_paths : WLB_QUANTUM_TOTAL;
 }
@@ -1130,7 +1140,13 @@ xqc_wlb_scheduler_get_path(void *scheduler,
      * unreliable DATAGRAM may be used here. Sending a unique reliable STREAM
      * packet down a known-blackholed path creates a receive-ordering hole;
      * the healthy paths can then deliver thousands of later frames behind it
-     * and exhaust the peer's reassembly-node budget. */
+     * and exhaust the peer's reassembly-node budget.
+     *
+     * As the code stands the test cannot be false: po_flow_hash is set only
+     * by the datagram writer, and a packet without it already returned
+     * through the MinRTT fallback above. It is kept as a statement of the
+     * invariant this depends on, not as a live branch -- whoever gives a
+     * STREAM packet a flow hash needs to see why that is unsafe here. */
     if (packet_out->po_frame_types & XQC_FRAME_BIT_DATAGRAM) {
         xqc_path_ctx_t *probe =
             wlb_pick_evicted_probe(s, conn, packet_out, check_cwnd, now_us);

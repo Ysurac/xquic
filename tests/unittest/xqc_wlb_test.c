@@ -571,8 +571,11 @@ xqc_test_wlb_recovery_prefer_fires_after_real_failover(void)
     wlb_test_fixture_t f;
     wlb_test_setup(&f);
 
-    xqc_path_ctx_t *p0 = wlb_test_add_path(&f, 0, 10000, 64 * 1024, 0);
-    xqc_path_ctx_t *p1 = wlb_test_add_path(&f, 1, 10000, 64 * 1024, 0);
+    /* Deliberately lopsided: plain WRR would pin a fresh flow to the wide
+     * path 0. With equal weights the assertion below was satisfied either
+     * way, so disabling the recovery grace entirely left the test green. */
+    xqc_path_ctx_t *p0 = wlb_test_add_path(&f, 0, 10000, 512 * 1024, 0);
+    xqc_path_ctx_t *p1 = wlb_test_add_path(&f, 1, 10000, 16 * 1024, 0);
     (void)p0;
 
     uint32_t flow = 0x33334444;
@@ -786,7 +789,10 @@ xqc_test_wlb_stream_data_spills_when_primary_is_full(void)
     CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 0);
     /* path_schedule_bytes, not bytes_in_flight: this is the counter the send
      * pass accumulates as it assigns packets, and it is what makes the spill
-     * happen WITHIN one pass rather than one RTT later. */
+     * happen WITHIN one pass rather than one RTT later. Scope: this covers
+     * the scheduler's use of the field. The accumulation itself lives in
+     * xqc_path_send_buffer_append, which this fixture never runs -- breaking
+     * that += would not fail here. */
     f.paths[0].path_schedule_bytes = 200;
 
     int on_far = 0;
