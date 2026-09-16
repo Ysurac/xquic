@@ -65,6 +65,19 @@ xqc_create_client_ssl_ctx(xqc_tls_ctx_t *ctx)
     /* set the lifetime of session */
     xqc_ssl_ctx_set_timeout(ssl_ctx, ctx->cfg.session_timeout);
 
+    /* Default filesystem trust paths for the library-side verification
+     * path (NEED_VERIFY without APP_VERIFY). Return value intentionally
+     * ignored: this only fails on OOM (X509_STORE_add_lookup) — a
+     * missing/unreadable bundle
+     * file is swallowed internally and still reports success. A missing
+     * bundle is silent; verification then fails per certificate, exactly
+     * as it did without a store. */
+    SSL_CTX_set_default_verify_paths(ssl_ctx);
+
+    /* per-connection decision: X509_verify_cert, or the application when the
+     * connection set XQC_TLS_CERT_FLAG_APP_VERIFY */
+    SSL_CTX_set_cert_verify_callback(ssl_ctx, xqc_ssl_chain_verify_cb, NULL);
+
     ctx->ssl_ctx = ssl_ctx;
     return XQC_OK;
 

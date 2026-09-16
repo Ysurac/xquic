@@ -1308,6 +1308,17 @@ typedef struct xqc_engine_ssl_config_s {
 typedef enum {
     XQC_TLS_CERT_FLAG_NEED_VERIFY = 1 << 0,
     XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED = 1 << 1,
+    /**
+     * delegate the whole certificate decision to cert_verify_cb: the callback
+     * receives the chain exactly as the peer presented it (leaf first) on
+     * every full handshake (a resumed session carries the decision made when
+     * it was established) and its return value is final; the library
+     * performs no chain building, root-store lookup or hostname check of its
+     * own. Implies peer verification (SSL_VERIFY_PEER) even without
+     * XQC_TLS_CERT_FLAG_NEED_VERIFY; XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED is
+     * ignored under this flag.
+     */
+    XQC_TLS_CERT_FLAG_APP_VERIFY = 1 << 2,
 } xqc_cert_verify_flag_e;
 
 typedef enum {

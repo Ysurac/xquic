@@ -57,13 +57,20 @@ xqc_ssl_get_certs_array(SSL *ssl, X509_STORE_CTX *store_ctx, unsigned char **cer
     unsigned char *cert_buf = NULL;
     X509 *cert = NULL;
     int cert_size = 0;
-    const STACK_OF(X509) *chain = X509_STORE_CTX_get0_chain(store_ctx);
+    /* the chain as presented by the peer (leaf first). get0_chain would be
+     * the verified chain, which does not exist yet when the SSL_CTX-level
+     * cert verify callback (xqc_ssl_chain_verify_cb) runs. */
+    const STACK_OF(X509) *chain = X509_STORE_CTX_get0_untrusted(store_ctx);
 
-    *certs_array_len = sk_X509_num(chain);
-    if (*certs_array_len > XQC_MAX_VERIFY_DEPTH) { /* impossible */
+    /* bound against the caller's capacity before writing *certs_array_len,
+     * so a caller never sees an oversized count on the error path */
+    size_t n = sk_X509_num(chain);
+    if (n > array_cap) {
+        *certs_array_len = 0;
         X509_STORE_CTX_set_error(store_ctx, X509_V_ERR_CERT_CHAIN_TOO_LONG);
         return -XQC_TLS_INTERNAL;
     }
+    *certs_array_len = n;
 
     for (int i = 0; i < *certs_array_len; i++) {
         cert = sk_X509_value(chain, i);
