@@ -49,11 +49,32 @@
 /*
  * CWE-770 mitigation for buffered STREAM frame nodes (RFC 9000 §21.7).
  *
- * 8192 remains the sparse-fragment threshold: beyond it, a stream must carry
- * enough payload per node to avoid metadata amplification.  A separate hard
- * ceiling still bounds dense packet-sized nodes.  The hard ceiling covers a
- * full 16 MiB receive window even when ordinary QUIC/H3 framing leaves less
- * than one MSS of application payload in each packet.
+ * Why two tiers rather than one node count: a flat cap does not distinguish
+ * the attack §21.7 describes -- "a large number of small STREAM frames" --
+ * from a busy stream, so it charges a 1-byte fragment and a full-MSS frame
+ * the same single node and stops both at the same place.  That put the cap
+ * below the flow-control window in ordinary operation.  §4.1 requires an
+ * endpoint to "buffer any data that is received out of order, up to the
+ * advertised flow control limit", and nodes are freed only in
+ * xqc_stream_recv, so the node count tracks undelivered bytes divided by
+ * frame size whether or not anything arrived out of order.  Against the
+ * 16 MiB XQC_MAX_RECV_WINDOW, 1379-byte frames reach 12166 nodes -- 1.49x
+ * past a flat 8192 with one path and no reordering at all.  Measured on this
+ * tree: 8192 strictly in-order hole-free frames, then rejection, at 10.8 MiB
+ * of a window advertised as 16.  A downstream multi-WAN deployment reported
+ * the field shape of that on a Starlink-beside-5G profile: 996 cap
+ * rejections, 286 MB delivered and 17.9 s with no tunnel response, against
+ * 0 rejections and 1749 MB with the tiers in.
+ *
+ * So 8192 stays, but as the sparse-fragment threshold it was meant to be:
+ * beyond it a stream must carry enough payload per node to avoid metadata
+ * amplification, which is what a small-frame attack cannot do and a
+ * packet-sized stream trivially can.  The separate hard ceiling bounds the
+ * dense case, and covers a full 16 MiB receive window even when ordinary
+ * QUIC/H3 framing leaves less than one MSS of application payload in each
+ * packet.  Note it is a fixed node count, not window-relative: at the
+ * default window the headroom is 2.7x, but a substantially larger window
+ * with small frames would put the ceiling back in front of flow control.
  *
  * The receive window bounds the hard ceiling only while the buffered ranges
  * are disjoint.  The density budget charges each node its own data_length,
