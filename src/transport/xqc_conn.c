@@ -6003,6 +6003,7 @@ xqc_conn_reassemble_packet(xqc_connection_t *conn, xqc_packet_out_t *ori_po)
 
     /* copy packet_out info */
     new_po->po_frame_types = ori_po->po_frame_types;
+    new_po->po_dgram_payload_size = ori_po->po_dgram_payload_size;
     for (int i = 0; i < XQC_MAX_STREAM_FRAME_IN_PO; i++) {
         new_po->po_stream_frames[i] = ori_po->po_stream_frames[i];
     }
@@ -6925,6 +6926,10 @@ xqc_conn_tls_cert_verify_cb(const unsigned char *certs[], const size_t cert_len[
                             size_t certs_len, void *user_data)
 {
     xqc_connection_t *conn = (xqc_connection_t *)user_data;
+    if (conn->transport_cbs.cert_verify_cb == NULL) {
+        xqc_log(conn->log, XQC_LOG_ERROR, "|cert verify requested without cert_verify_cb|");
+        return -XQC_TLS_INTERNAL;
+    }
     return conn->transport_cbs.cert_verify_cb(certs, cert_len, certs_len,
                                               conn->user_data);
 }

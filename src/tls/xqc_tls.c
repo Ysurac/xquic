@@ -229,8 +229,11 @@ xqc_tls_init_client_ssl(xqc_tls_t *tls, xqc_tls_config_t *cfg)
         }
     }
 
-    /* set verify if flag set */
-    if (cfg->cert_verify_flag & XQC_TLS_CERT_FLAG_NEED_VERIFY) {
+    /* set verify if flag set. XQC_TLS_CERT_FLAG_APP_VERIFY alone also turns
+     * on SSL_VERIFY_PEER: without it the ssl library would run under
+     * verify_mode NONE and silently ignore whatever cert_verify_cb decided
+     * (fail-open). */
+    if (cfg->cert_verify_flag & (XQC_TLS_CERT_FLAG_NEED_VERIFY | XQC_TLS_CERT_FLAG_APP_VERIFY)) {
         if (X509_VERIFY_PARAM_set1_host(SSL_get0_param(ssl), hostname,
                                         strlen(hostname)) != XQC_SSL_SUCCESS) {
             /* hostname set failed need log */
@@ -1027,6 +1030,65 @@ xqc_ssl_new_session_cb(SSL *ssl, SSL_SESSION *session)
 end:
     /* return one for taking ownership and zero otherwise */
     return 0;
+}
+
+
+int
+xqc_ssl_chain_verify_cb(X509_STORE_CTX *store_ctx, void *arg)
+{
+    (void)arg;
+    int verify_res = XQC_SSL_SUCCESS;
+    size_t certs_array_len = 0;
+    unsigned char *certs_array[XQC_MAX_VERIFY_DEPTH] = {0};
+    size_t certs_len[XQC_MAX_VERIFY_DEPTH] = {0};
+
+    SSL *ssl = X509_STORE_CTX_get_ex_data(store_ctx, SSL_get_ex_data_X509_STORE_CTX_idx());
+    xqc_tls_t *tls = (ssl != NULL) ? (xqc_tls_t *)SSL_get_app_data(ssl) : NULL;
+
+    /* No delegation requested (or no connection to ask): the library decides.
+     * The per-certificate callback and the hostname check run inside
+     * X509_verify_cert exactly as before. No error_cb and no log here: under
+     * verify_mode NONE the ssl library still calls this and ignores the
+     * result, so reporting an error would break the insecure path. */
+    if (tls == NULL) {
+        return X509_verify_cert(store_ctx);
+    }
+    if ((tls->cert_verify_flag & XQC_TLS_CERT_FLAG_APP_VERIFY) == 0) {
+        return X509_verify_cert(store_ctx);
+    }
+
+    /* the application owns the decision: hand over the presented chain */
+    xqc_int_t ret = xqc_ssl_get_certs_array(ssl, store_ctx, certs_array, XQC_MAX_VERIFY_DEPTH,
+                                            &certs_array_len, certs_len);
+    if (ret != XQC_OK) {
+        xqc_log(tls->log, XQC_LOG_ERROR, "|get cert array error|%d|", ret);
+        /* the backend already bounded certs_array_len by our capacity (and
+         * zeroed it on the CERT_CHAIN_TOO_LONG path), so the free below is
+         * safe as-is */
+        verify_res = XQC_SSL_FAIL;
+
+    } else if (tls->cbs->cert_verify_cb == NULL) {
+        xqc_log(tls->log, XQC_LOG_ERROR, "|app verify requested without cert_verify_cb|");
+        verify_res = XQC_SSL_FAIL;
+
+    } else if (tls->cbs->cert_verify_cb((const unsigned char **)certs_array, certs_len,
+                                        certs_array_len, tls->user_data) != XQC_OK)
+    {
+        xqc_log(tls->log, XQC_LOG_ERROR, "|certificate rejected by application|");
+        verify_res = XQC_SSL_FAIL;
+    }
+
+    if (verify_res != XQC_SSL_SUCCESS && X509_STORE_CTX_get_error(store_ctx) == X509_V_OK) {
+        /* only fill in a generic reason when nothing more specific is
+         * already set (e.g. the get-certs failure path above already left
+         * X509_V_ERR_CERT_CHAIN_TOO_LONG in store_ctx). the ssl library maps
+         * whichever error is set to an alert and reports it through
+         * xqc_tls_send_alert -> error_cb; do not notify twice here */
+        X509_STORE_CTX_set_error(store_ctx, X509_V_ERR_APPLICATION_VERIFICATION);
+    }
+
+    xqc_ssl_free_certs_array(certs_array, certs_array_len);
+    return verify_res;
 }
 
 

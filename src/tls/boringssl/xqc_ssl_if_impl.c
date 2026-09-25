@@ -55,11 +55,15 @@ xqc_ssl_get_certs_array(SSL *ssl, X509_STORE_CTX *store_ctx, unsigned char **cer
 {
     const STACK_OF(CRYPTO_BUFFER) *chain = SSL_get0_peer_certificates(ssl);
 
-    *certs_array_len = sk_CRYPTO_BUFFER_num(chain);
-    if (*certs_array_len > XQC_MAX_VERIFY_DEPTH) {
+    /* bound against the caller's capacity before writing *certs_array_len,
+     * so a caller never sees an oversized count on the error path */
+    size_t n = sk_CRYPTO_BUFFER_num(chain);
+    if (n > array_cap) {
+        *certs_array_len = 0;
         X509_STORE_CTX_set_error(store_ctx, X509_V_ERR_CERT_CHAIN_TOO_LONG);
         return -XQC_TLS_INTERNAL;
     }
+    *certs_array_len = n;
 
     for (int i = 0; i < *certs_array_len; i++) {
         CRYPTO_BUFFER * buffer = sk_CRYPTO_BUFFER_value(chain, i);

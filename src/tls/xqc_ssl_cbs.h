@@ -56,6 +56,14 @@ int xqc_ssl_new_session_cb(SSL *ssl, SSL_SESSION *session);
  */
 int xqc_ssl_cert_verify_cb(int ok, X509_STORE_CTX *store_ctx);
 
+/**
+ * @brief SSL_CTX-level certificate verify callback of the client context
+ * (SSL_CTX_set_cert_verify_callback). Delegates to X509_verify_cert unless the
+ * connection set XQC_TLS_CERT_FLAG_APP_VERIFY, in which case the presented
+ * chain is handed to cert_verify_cb and its answer is final.
+ */
+int xqc_ssl_chain_verify_cb(X509_STORE_CTX *store_ctx, void *arg);
+
 
 /**
  * @brief certificate callback

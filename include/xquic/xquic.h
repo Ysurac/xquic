@@ -1104,6 +1104,21 @@ typedef struct xqc_scheduler_callback_s {
                                             xqc_scheduler_conn_event_t event,
                                             void *event_arg);
 
+    /**
+     * Optional. Invoked when a packet carrying application payload (STREAM
+     * or DATAGRAM bytes) is confirmed acknowledged for the first time, with
+     * the acknowledged payload byte count and the path it was sent on. Never
+     * invoked with payload_bytes == 0, so a control-only packet does not
+     * reach it. Schedulers that learn per-path goodput implement this; leave
+     * NULL otherwise. No ack timestamp is passed: a scheduler that needs one
+     * reads the clock where it consumes the counter, which is what keeps a
+     * sample spanning wall clock rather than the span of an ACK burst.
+     * Appended last so existing designated initialisers keep zero-filling it.
+     */
+    void (*xqc_scheduler_on_app_packet_acked)(void *scheduler,
+                                              uint64_t path_id,
+                                              uint64_t payload_bytes);
+
 } xqc_scheduler_callback_t;
 
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_minrtt_scheduler_cb;
@@ -1330,6 +1345,17 @@ typedef struct xqc_engine_ssl_config_s {
 typedef enum {
     XQC_TLS_CERT_FLAG_NEED_VERIFY = 1 << 0,
     XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED = 1 << 1,
+    /**
+     * delegate the whole certificate decision to cert_verify_cb: the callback
+     * receives the chain exactly as the peer presented it (leaf first) on
+     * every full handshake (a resumed session carries the decision made when
+     * it was established) and its return value is final; the library
+     * performs no chain building, root-store lookup or hostname check of its
+     * own. Implies peer verification (SSL_VERIFY_PEER) even without
+     * XQC_TLS_CERT_FLAG_NEED_VERIFY; XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED is
+     * ignored under this flag.
+     */
+    XQC_TLS_CERT_FLAG_APP_VERIFY = 1 << 2,
 } xqc_cert_verify_flag_e;
 
 typedef enum {
@@ -1417,9 +1443,18 @@ typedef struct xqc_conn_settings_s {
     uint64_t sndq_packets_used_max;
     /**
      * Max buffered out-of-order STREAM frame nodes per stream (reassembly
-     * cap, CWE-770 mitigation per RFC 9000 §21.7). 0 means the built-in
-     * default (8192). Lowering it bounds reassembly memory more tightly at
-     * the cost of more retransmissions under heavy cross-path reordering.
+     * cap, CWE-770 mitigation per RFC 9000 §21.7).
+     *
+     * 0 selects the built-in two-tier default: past 8192 nodes the density
+     * budget charges 256 bytes of payload for every buffered node except one
+     * reserved for a frame that fills the leftmost reassembly hole (so the
+     * average may sit just under 256), and 32768 nodes is the ceiling
+     * regardless of density. That lets a full receive window of packet-sized
+     * frames queue while still stopping sparse-fragment amplification.
+     *
+     * Any nonzero value is a single absolute cap on node count, density
+     * ignored. Lowering it bounds reassembly memory more tightly at the cost
+     * of more retransmissions under heavy cross-path reordering.
      */
     uint64_t max_stream_frame_buffered_cnt;
     xqc_linger_t linger;
