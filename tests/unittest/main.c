@@ -136,6 +136,10 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_empty_pkt", xqc_test_empty_pkt)
         || !CU_add_test(pSuite, "xqc_test_stateless_reset_parse_boundary", xqc_test_stateless_reset_parse_boundary)
         || !CU_add_test(pSuite, "xqc_test_transport_params", xqc_test_transport_params)
+        || !CU_add_test(pSuite, "xqc_test_tp_value_not_longer_than_len",
+                        xqc_test_tp_value_not_longer_than_len)
+        || !CU_add_test(pSuite, "xqc_test_tp_value_matches_len_decodes",
+                        xqc_test_tp_value_matches_len_decodes)
         || !CU_add_test(pSuite, "xqc_test_tp_cid_overflow", xqc_test_tp_cid_overflow)
         || !CU_add_test(pSuite, "xqc_test_check_transport_params_cids", xqc_test_check_transport_params_cids)
         || !CU_add_test(pSuite, "xqc_test_engine_packet_process", xqc_test_engine_packet_process)
