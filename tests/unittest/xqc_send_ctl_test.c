@@ -571,3 +571,185 @@ xqc_test_send_ctl_persistent_congestion_no_rtt_sample_early_return(void)
 
     xqc_engine_destroy(conn->engine);
 }
+
+
+/*
+ * Unresponsive-path detection while the scheduler keeps sending.
+ *
+ * Every ack-eliciting packet sent on a path restarts its PTO timer
+ * (RFC 9002 6.2.1), so on a path that silently stops delivering while
+ * packets keep going to it ctl_pto_count stays 0.
+ * xqc_send_ctl_get_effective_pto_count() counts the backed-off PTO periods
+ * since the path last showed progress (bytes in flight became non-zero,
+ * or an ACK acknowledged something sent on it) instead.
+ */
+static xqc_send_ctl_t *
+xqc_test_send_ctl_arm_unresponsive(xqc_connection_t *conn, xqc_usec_t since)
+{
+    xqc_send_ctl_t *send_ctl = conn->conn_initial_path->path_send_ctl;
+
+    conn->conn_flag |= XQC_CONN_FLAG_HANDSHAKE_CONFIRMED;
+    conn->remote_settings.max_ack_delay = 25;
+    send_ctl->ctl_srtt = 10000;
+    send_ctl->ctl_rttvar = 0;
+    send_ctl->ctl_pto_count = 0;
+    send_ctl->ctl_bytes_ack_eliciting_inflight[XQC_PNS_APP_DATA] = 1200;
+    send_ctl->ctl_inflight_since = since;
+    send_ctl->ctl_last_ack_progress_time = 0;
+    return send_ctl;
+}
+
+
+void
+xqc_test_send_ctl_effective_pto_count_backoff(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+    CU_ASSERT_FATAL(conn->conn_initial_path != NULL);
+
+    xqc_usec_t t0 = 1000000;
+    xqc_send_ctl_t *send_ctl = xqc_test_send_ctl_arm_unresponsive(conn, t0);
+    xqc_usec_t pto = xqc_send_ctl_calc_pto(send_ctl);
+    CU_ASSERT_FATAL(pto > 0);
+
+    /* PTO k would have fired 2^k - 1 base periods after t0 */
+    CU_ASSERT_EQUAL(xqc_send_ctl_get_effective_pto_count(send_ctl,
+                                                         t0 + pto - 1), 0);
+    CU_ASSERT_EQUAL(xqc_send_ctl_get_effective_pto_count(send_ctl,
+                                                         t0 + pto), 1);
+    CU_ASSERT_EQUAL(xqc_send_ctl_get_effective_pto_count(send_ctl,
+                                                         t0 + 3 * pto - 1), 1);
+    CU_ASSERT_EQUAL(xqc_send_ctl_get_effective_pto_count(send_ctl,
+                                                         t0 + 3 * pto), 2);
+    CU_ASSERT_EQUAL(xqc_send_ctl_get_effective_pto_count(send_ctl,
+                                                         t0 + 7 * pto), 3);
+
+    /* an ACK that acknowledged something restarts the count from there */
+    send_ctl->ctl_last_ack_progress_time = t0 + 6 * pto;
+    CU_ASSERT_EQUAL(xqc_send_ctl_get_effective_pto_count(send_ctl,
+                                                         t0 + 7 * pto - 1), 0);
+    CU_ASSERT_EQUAL(xqc_send_ctl_get_effective_pto_count(send_ctl,
+                                                         t0 + 7 * pto), 1);
+
+    /* the timer's own count is used when it is larger */
+    send_ctl->ctl_pto_count = 4;
+    CU_ASSERT_EQUAL(xqc_send_ctl_get_effective_pto_count(send_ctl,
+                                                         t0 + 7 * pto), 4);
+
+    xqc_engine_destroy(conn->engine);
+}
+
+
+void
+xqc_test_send_ctl_effective_pto_count_inactive(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+    CU_ASSERT_FATAL(conn->conn_initial_path != NULL);
+
+    xqc_usec_t t0 = 1000000;
+    xqc_send_ctl_t *send_ctl = xqc_test_send_ctl_arm_unresponsive(conn, t0);
+    xqc_usec_t late = t0 + 100 * xqc_send_ctl_calc_pto(send_ctl);
+    send_ctl->ctl_pto_count = 1;
+
+    /* nothing in flight: an idle path is not unresponsive */
+    send_ctl->ctl_bytes_ack_eliciting_inflight[XQC_PNS_APP_DATA] = 0;
+    CU_ASSERT_EQUAL(xqc_send_ctl_get_effective_pto_count(send_ctl, late), 1);
+    send_ctl->ctl_bytes_ack_eliciting_inflight[XQC_PNS_APP_DATA] = 1200;
+
+    /* handshake not confirmed: application data has no PTO yet */
+    conn->conn_flag &= ~XQC_CONN_FLAG_HANDSHAKE_CONFIRMED;
+    CU_ASSERT_EQUAL(xqc_send_ctl_get_effective_pto_count(send_ctl, late), 1);
+    conn->conn_flag |= XQC_CONN_FLAG_HANDSHAKE_CONFIRMED;
+
+    /* no reference time, or a clock that has not passed it */
+    send_ctl->ctl_inflight_since = 0;
+    CU_ASSERT_EQUAL(xqc_send_ctl_get_effective_pto_count(send_ctl, late), 1);
+    send_ctl->ctl_inflight_since = t0;
+    CU_ASSERT_EQUAL(xqc_send_ctl_get_effective_pto_count(send_ctl, t0), 1);
+
+    /* the same state counts once the guards are lifted */
+    CU_ASSERT(xqc_send_ctl_get_effective_pto_count(send_ctl, late) > 1);
+
+    xqc_engine_destroy(conn->engine);
+}
+
+
+void
+xqc_test_send_ctl_inflight_since_first_packet(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+    CU_ASSERT_FATAL(conn->conn_initial_path != NULL);
+
+    xqc_send_ctl_t *send_ctl = conn->conn_initial_path->path_send_ctl;
+    xqc_send_queue_t *sq = conn->conn_send_queue;
+    CU_ASSERT_FATAL(send_ctl != NULL && sq != NULL);
+
+    /* the client's Initial packets are in flight: start from an idle path,
+     * and put the counters back (plus what this test adds) at the end */
+    unsigned saved_bytes = send_ctl->ctl_bytes_in_flight;
+    uint32_t saved_app = send_ctl->ctl_bytes_ack_eliciting_inflight[XQC_PNS_APP_DATA];
+    send_ctl->ctl_bytes_in_flight = 0;
+    send_ctl->ctl_bytes_ack_eliciting_inflight[XQC_PNS_APP_DATA] = 0;
+
+    xqc_packet_out_t *po[2];
+    for (int i = 0; i < 2; i++) {
+        po[i] = xqc_packet_out_get(sq);
+        CU_ASSERT_FATAL(po[i] != NULL);
+        po[i]->po_pkt.pkt_pns = XQC_PNS_APP_DATA;
+        po[i]->po_path_id = send_ctl->ctl_path->path_id;
+        po[i]->po_frame_types = XQC_FRAME_BIT_PING;
+        po[i]->po_used_size = 100;
+        po[i]->po_sent_time = 5000 + 1000 * i;
+        /* owned by the queue, freed with the connection */
+        xqc_send_queue_insert_unacked(po[i],
+            &sq->sndq_unacked_packets[XQC_PNS_APP_DATA], sq);
+    }
+
+    /* the first packet in flight stamps the reference time */
+    xqc_send_ctl_increase_inflight(conn, po[0]);
+    CU_ASSERT_EQUAL(send_ctl->ctl_inflight_since, 5000);
+
+    /* more packets while some are in flight keep it */
+    xqc_send_ctl_increase_inflight(conn, po[1]);
+    CU_ASSERT_EQUAL(send_ctl->ctl_inflight_since, 5000);
+    CU_ASSERT_EQUAL(send_ctl->ctl_bytes_in_flight, 200);
+
+    send_ctl->ctl_bytes_in_flight += saved_bytes;
+    send_ctl->ctl_bytes_ack_eliciting_inflight[XQC_PNS_APP_DATA] += saved_app;
+    xqc_engine_destroy(conn->engine);
+}
+
+
+void
+xqc_test_send_ctl_unresponsive_path_perf_class(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+    CU_ASSERT_FATAL(conn->conn_initial_path != NULL);
+
+    xqc_path_ctx_t *path = conn->conn_initial_path;
+    path->app_path_status = XQC_APP_PATH_STATUS_AVAILABLE;
+    xqc_usec_t now = xqc_monotonic_timestamp();
+    xqc_send_ctl_t *send_ctl = xqc_test_send_ctl_arm_unresponsive(conn, now);
+    xqc_usec_t pto = xqc_send_ctl_calc_pto(send_ctl);
+    CU_ASSERT_FATAL(now > 100 * pto);
+
+    /* bytes just went in flight: the path keeps its class */
+    CU_ASSERT_NOT_EQUAL(xqc_path_get_perf_class(path),
+                        XQC_PATH_CLASS_AVAILABLE_LOW);
+
+    /* no ACK for many PTO periods although the timer never fired */
+    send_ctl->ctl_inflight_since = now - 100 * pto;
+    CU_ASSERT_EQUAL(send_ctl->ctl_pto_count, 0);
+    CU_ASSERT_EQUAL(xqc_path_get_perf_class(path),
+                    XQC_PATH_CLASS_AVAILABLE_LOW);
+
+    /* an ACK that acknowledged something brings it back */
+    send_ctl->ctl_last_ack_progress_time = xqc_monotonic_timestamp();
+    CU_ASSERT_NOT_EQUAL(xqc_path_get_perf_class(path),
+                        XQC_PATH_CLASS_AVAILABLE_LOW);
+
+    xqc_engine_destroy(conn->engine);
+}

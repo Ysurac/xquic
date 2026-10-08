@@ -97,6 +97,12 @@ typedef struct xqc_send_ctl_s {
 
     xqc_usec_t                  ctl_last_inflight_pkt_sent_time;
     xqc_usec_t                  ctl_time_of_last_sent_ack_eliciting_packet[XQC_PNS_N];
+    /* Liveness of the path as a sender sees it, for
+     * xqc_send_ctl_get_effective_pto_count(): when bytes in flight last
+     * went from zero to non-zero, and when an ACK last acknowledged a
+     * packet sent on this path. */
+    xqc_usec_t                  ctl_inflight_since;
+    xqc_usec_t                  ctl_last_ack_progress_time;
     xqc_packet_number_t         ctl_last_sent_ack_eliciting_packet_number[XQC_PNS_N];
     xqc_usec_t                  ctl_srtt,
                                 ctl_rttvar,
@@ -283,6 +289,16 @@ void xqc_send_ctl_set_loss_detection_timer(xqc_send_ctl_t *send_ctl);
 xqc_usec_t xqc_send_ctl_get_earliest_loss_time(xqc_send_ctl_t *send_ctl, xqc_pkt_num_space_t *pns_ret);
 
 xqc_usec_t xqc_send_ctl_get_srtt(xqc_send_ctl_t *send_ctl);
+
+/**
+ * The PTO count the path would have if sending more data did not restart
+ * its PTO timer: the number of backed-off PTO periods for which the path
+ * has had bytes in flight without an ACK acknowledging anything sent on it,
+ * or ctl_pto_count if larger. Schedulers compare this, not ctl_pto_count,
+ * with their thresholds.
+ */
+unsigned xqc_send_ctl_get_effective_pto_count(xqc_send_ctl_t *send_ctl,
+    xqc_usec_t now);
 
 float xqc_send_ctl_get_retrans_rate(xqc_send_ctl_t *send_ctl);
 

@@ -43,4 +43,14 @@ void xqc_test_send_ctl_persistent_congestion_rtt_reseeds_from_new_sample(void);
 void xqc_test_send_ctl_single_loss_does_not_reset_rtt(void);
 void xqc_test_send_ctl_persistent_congestion_no_rtt_sample_early_return(void);
 
+/*
+ * Unresponsive-path detection: a path with bytes in flight and no ACK
+ * progress for several PTO periods is demoted although every new send
+ * restarts its PTO timer (RFC 9002 6.2.1) and ctl_pto_count stays 0.
+ */
+void xqc_test_send_ctl_effective_pto_count_backoff(void);
+void xqc_test_send_ctl_effective_pto_count_inactive(void);
+void xqc_test_send_ctl_inflight_since_first_packet(void);
+void xqc_test_send_ctl_unresponsive_path_perf_class(void);
+
 #endif

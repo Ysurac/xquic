@@ -254,6 +254,15 @@ main(int argc, char *argv[])
                         xqc_test_send_ctl_single_loss_does_not_reset_rtt)
         || !CU_add_test(pSuite, "xqc_test_send_ctl_persistent_congestion_no_rtt_sample_early_return",
                         xqc_test_send_ctl_persistent_congestion_no_rtt_sample_early_return)
+        /* unresponsive path while the scheduler keeps sending on it */
+        || !CU_add_test(pSuite, "xqc_test_send_ctl_effective_pto_count_backoff",
+                        xqc_test_send_ctl_effective_pto_count_backoff)
+        || !CU_add_test(pSuite, "xqc_test_send_ctl_effective_pto_count_inactive",
+                        xqc_test_send_ctl_effective_pto_count_inactive)
+        || !CU_add_test(pSuite, "xqc_test_send_ctl_inflight_since_first_packet",
+                        xqc_test_send_ctl_inflight_since_first_packet)
+        || !CU_add_test(pSuite, "xqc_test_send_ctl_unresponsive_path_perf_class",
+                        xqc_test_send_ctl_unresponsive_path_perf_class)
         /* RFC 9000 §6.2 Version Negotiation abort suite */
         || !CU_add_test(pSuite, "xqc_test_vn_abort_on_unsupported_version", xqc_test_vn_abort_on_unsupported_version)
         || !CU_add_test(pSuite, "xqc_test_vn_downgrade_protection_when_version_matches", xqc_test_vn_downgrade_protection_when_version_matches)

@@ -1872,7 +1872,8 @@ xqc_path_get_perf_class(xqc_path_ctx_t *path)
 
     // low 
     if (path_srtt > param->rtt_us_thr_high
-        || path->path_send_ctl->ctl_pto_count >= param->pto_cnt_thr
+        || xqc_send_ctl_get_effective_pto_count(path->path_send_ctl,
+               xqc_monotonic_timestamp()) >= param->pto_cnt_thr
         || loss_rate > param->loss_percent_thr_high) 
     {
         if (path->app_path_status == XQC_APP_PATH_STATUS_AVAILABLE) {
