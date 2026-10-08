@@ -18,10 +18,12 @@
 #include "xquic/xquic.h"
 #include "src/transport/xqc_conn.h"
 #include "src/transport/xqc_multipath.h"
+#include "src/transport/xqc_send_ctl.h"
 #include "src/common/xqc_list.h"
 #include "src/common/xqc_malloc.h"
 #include "xqc_test_helpers.h"
 #include "xqc_test_path_hard_cap.h"
+#include "xqc_common_test.h"
 
 /* xqc_path_create has no public prototype — used via direct linkage. */
 extern xqc_path_ctx_t *xqc_path_create(xqc_connection_t *conn, xqc_cid_t *scid,
@@ -173,4 +175,39 @@ test_dos_peer_init_max_path_id_max_valid(void)
     CU_ASSERT(conn->create_path_count == create_count_before);
 
     xqc_test_helper_conn_destroy(conn);
+}
+
+/* A closing or closed path stays on conn_paths_list until the connection is
+ * destroyed, and the schedulers classify every entry of that list for every
+ * packet before they skip the paths that are not active. Such a path takes
+ * the lowest class without being measured (the measurement walks the whole
+ * path list again); an active path with the same statistics is still
+ * measured. */
+void
+test_path_perf_class_closing_path(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_PTR_NOT_NULL_FATAL(conn);
+    xqc_path_ctx_t *path = conn->conn_initial_path;
+    CU_ASSERT_PTR_NOT_NULL_FATAL(path);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(path->path_send_ctl);
+
+    xqc_path_state_t state = path->path_state;
+    path->app_path_status = XQC_APP_PATH_STATUS_AVAILABLE;
+    path->path_send_ctl->ctl_srtt = 10000;
+    path->path_send_ctl->ctl_pto_count = 0;
+
+    path->path_state = XQC_PATH_STATE_ACTIVE;
+    xqc_path_perf_class_t active = xqc_path_get_perf_class(path);
+    CU_ASSERT(active == XQC_PATH_CLASS_AVAILABLE_HIGH
+              || active == XQC_PATH_CLASS_AVAILABLE_MID);
+
+    path->path_state = XQC_PATH_STATE_CLOSING;
+    CU_ASSERT_EQUAL(xqc_path_get_perf_class(path), XQC_PATH_CLASS_STANDBY_LOW);
+
+    path->path_state = XQC_PATH_STATE_CLOSED;
+    CU_ASSERT_EQUAL(xqc_path_get_perf_class(path), XQC_PATH_CLASS_STANDBY_LOW);
+
+    path->path_state = state;
+    xqc_engine_destroy(conn->engine);
 }
