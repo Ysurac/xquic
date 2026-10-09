@@ -270,6 +270,7 @@ uint64_t g_last_sock_op_time;
  * 701/702 for 0-RTT transport param validation
  * 703 for CRYPTO_ERROR validation
  * 704 for active_connection_id_limit validation
+ * 713/714 for max_ack_delay boundary validation
  * 8XX for MASQUE e2e testcases
  */
 int g_test_case;

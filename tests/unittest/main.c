@@ -136,6 +136,12 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_empty_pkt", xqc_test_empty_pkt)
         || !CU_add_test(pSuite, "xqc_test_stateless_reset_parse_boundary", xqc_test_stateless_reset_parse_boundary)
         || !CU_add_test(pSuite, "xqc_test_transport_params", xqc_test_transport_params)
+        || !CU_add_test(pSuite, "xqc_test_max_ack_delay_default_when_absent",
+                        xqc_test_max_ack_delay_default_when_absent)
+        || !CU_add_test(pSuite, "xqc_test_max_ack_delay_valid_boundary",
+                        xqc_test_max_ack_delay_valid_boundary)
+        || !CU_add_test(pSuite, "xqc_test_max_ack_delay_invalid_boundary",
+                        xqc_test_max_ack_delay_invalid_boundary)
         || !CU_add_test(pSuite, "xqc_test_tp_cid_overflow", xqc_test_tp_cid_overflow)
         || !CU_add_test(pSuite, "xqc_test_check_transport_params_cids", xqc_test_check_transport_params_cids)
         || !CU_add_test(pSuite, "xqc_test_engine_packet_process", xqc_test_engine_packet_process)
