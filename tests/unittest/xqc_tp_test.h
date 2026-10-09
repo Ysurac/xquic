@@ -9,6 +9,8 @@ void xqc_test_transport_params();
 void xqc_test_max_ack_delay_default_when_absent(void);
 void xqc_test_max_ack_delay_valid_boundary(void);
 void xqc_test_max_ack_delay_invalid_boundary(void);
+void xqc_test_tp_value_not_longer_than_len(void);
+void xqc_test_tp_value_matches_len_decodes(void);
 void xqc_test_tp_cid_overflow();
 void xqc_test_check_transport_params_cids();
 
