@@ -643,6 +643,11 @@ xqc_send_ctl_increase_inflight(xqc_connection_t *conn, xqc_packet_out_t *packet_
     xqc_send_ctl_t *send_ctl = path->path_send_ctl;
     if (!(packet_out->po_flag & XQC_POF_IN_FLIGHT) && XQC_CAN_IN_FLIGHT(packet_out->po_frame_types)) {
         if (XQC_IS_ACK_ELICITING(packet_out->po_frame_types)) {
+            if (send_ctl->ctl_bytes_in_flight == 0) {
+                send_ctl->ctl_inflight_since = packet_out->po_sent_time
+                                               ? packet_out->po_sent_time
+                                               : xqc_monotonic_timestamp();
+            }
             send_ctl->ctl_bytes_in_flight += packet_out->po_used_size;
             send_ctl->ctl_bytes_ack_eliciting_inflight[packet_out->po_pkt.pkt_pns] += packet_out->po_used_size;
             packet_out->po_flag |= XQC_POF_IN_FLIGHT;
@@ -1067,6 +1072,8 @@ xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc
     if (!has_acked) {
         return XQC_OK;
     }
+
+    send_ctl->ctl_last_ack_progress_time = ack_recv_time;
 
     if (update_largest_ack && has_ack_eliciting && ack_on_same_path) {
         if (!ignore_rtt) {
@@ -2068,6 +2075,42 @@ xqc_usec_t
 xqc_send_ctl_get_srtt(xqc_send_ctl_t *send_ctl)
 {
     return send_ctl->ctl_srtt;
+}
+
+/*
+ * The PTO timer is restarted by every ack-eliciting packet sent on the path
+ * (RFC 9002 6.2.1). On a path that silently stops delivering while the
+ * application keeps sending more often than once per PTO, the timer never
+ * fires, ctl_pto_count stays 0 and every scheduler keeps choosing the path,
+ * so the traffic it carries is lost until its cwnd fills. Count the same
+ * backed-off PTO periods from the moment the path last showed progress
+ * (bytes in flight became non-zero, or an ACK acknowledged something)
+ * instead of from the last send.
+ */
+unsigned
+xqc_send_ctl_get_effective_pto_count(xqc_send_ctl_t *send_ctl, xqc_usec_t now)
+{
+    unsigned cnt = send_ctl->ctl_pto_count;
+    if (send_ctl->ctl_bytes_ack_eliciting_inflight[XQC_PNS_APP_DATA] == 0
+        || !xqc_conn_is_handshake_confirmed(send_ctl->ctl_conn))
+    {
+        return cnt;
+    }
+
+    xqc_usec_t since = xqc_max(send_ctl->ctl_inflight_since,
+                               send_ctl->ctl_last_ack_progress_time);
+    xqc_usec_t pto = xqc_send_ctl_calc_pto(send_ctl);
+    if (since == 0 || now <= since || pto == 0) {
+        return cnt;
+    }
+
+    /* PTO k fires (2^k - 1) base periods after the send (backoff factor 2) */
+    uint64_t periods = (now - since) / pto;
+    unsigned virt = 0;
+    while (virt < 16 && periods >= (1ULL << (virt + 1)) - 1) {
+        virt++;
+    }
+    return xqc_max(cnt, virt);
 }
 
 float

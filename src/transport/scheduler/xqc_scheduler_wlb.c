@@ -319,7 +319,8 @@ wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
         /* Blackholed paths can stay ACTIVE without socket error. Treat a path
          * with repeated PTOs as unhealthy for recovery-detection purposes. */
         if (scan_path->path_send_ctl
-            && scan_path->path_send_ctl->ctl_pto_count >= WLB_PTO_EVICT_THRESH)
+            && xqc_send_ctl_get_effective_pto_count(scan_path->path_send_ctl,
+                   xqc_monotonic_timestamp()) >= WLB_PTO_EVICT_THRESH)
         {
             continue;
         }
@@ -488,7 +489,8 @@ static xqc_bool_t
 wlb_path_blackholed(xqc_path_ctx_t *path)
 {
     return path->path_send_ctl != NULL
-           && path->path_send_ctl->ctl_pto_count >= WLB_PTO_EVICT_THRESH;
+           && xqc_send_ctl_get_effective_pto_count(path->path_send_ctl,
+                  xqc_monotonic_timestamp()) >= WLB_PTO_EVICT_THRESH;
 }
 
 static xqc_bool_t
@@ -982,7 +984,8 @@ wlb_minrtt_fallback(xqc_connection_t *conn, xqc_packet_out_t *packet_out,
          * po_flow_hash==0 packets via this MinRTT fallback, so omitting the
          * PTO guard can stall failover even if app datagrams are re-pinned. */
         if (path->path_send_ctl
-            && path->path_send_ctl->ctl_pto_count >= WLB_PTO_EVICT_THRESH)
+            && xqc_send_ctl_get_effective_pto_count(path->path_send_ctl,
+                   xqc_monotonic_timestamp()) >= WLB_PTO_EVICT_THRESH)
         {
             continue;
         }

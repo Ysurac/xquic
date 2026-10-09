@@ -48,7 +48,8 @@ wrtt_path_is_usable(xqc_path_ctx_t *path, int reinject, xqc_packet_out_t *packet
         && path->app_path_status != XQC_APP_PATH_STATUS_FROZEN
         && !(path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR)
         && !(path->path_send_ctl
-             && path->path_send_ctl->ctl_pto_count >= WRTT_PTO_SKIP_THRESH)
+             && xqc_send_ctl_get_effective_pto_count(path->path_send_ctl,
+                    xqc_monotonic_timestamp()) >= WRTT_PTO_SKIP_THRESH)
         && !(reinject && path->path_id == packet_out->po_path_id);
 }
 
