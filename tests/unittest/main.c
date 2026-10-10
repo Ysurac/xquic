@@ -259,6 +259,11 @@ main(int argc, char *argv[])
                         xqc_test_send_ctl_single_loss_does_not_reset_rtt)
         || !CU_add_test(pSuite, "xqc_test_send_ctl_persistent_congestion_no_rtt_sample_early_return",
                         xqc_test_send_ctl_persistent_congestion_no_rtt_sample_early_return)
+        /* silently failed path: PTO expiries hidden by sends */
+        || !CU_add_test(pSuite, "xqc_test_effective_pto_count_silent_path",
+                        xqc_test_effective_pto_count_silent_path)
+        || !CU_add_test(pSuite, "xqc_test_effective_pto_count_bounds",
+                        xqc_test_effective_pto_count_bounds)
         /* RFC 9000 §6.2 Version Negotiation abort suite */
         || !CU_add_test(pSuite, "xqc_test_vn_abort_on_unsupported_version", xqc_test_vn_abort_on_unsupported_version)
         || !CU_add_test(pSuite, "xqc_test_vn_downgrade_protection_when_version_matches", xqc_test_vn_downgrade_protection_when_version_matches)
@@ -409,6 +414,8 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_wlb_stream_data_never_rides_a_blackholed_path", xqc_test_wlb_stream_data_never_rides_a_blackholed_path)
         || !CU_add_test(pSuite, "xqc_test_wlb_blackholed_path_does_not_stall_rounds", xqc_test_wlb_blackholed_path_does_not_stall_rounds)
         || !CU_add_test(pSuite, "xqc_test_wlb_unpinned_blackhole_refreshes_topology", xqc_test_wlb_unpinned_blackhole_refreshes_topology)
+        || !CU_add_test(pSuite, "xqc_test_wlb_unresponsive_path_evicted_before_pto", xqc_test_wlb_unresponsive_path_evicted_before_pto)
+        || !CU_add_test(pSuite, "xqc_test_wlb_acked_path_not_evicted", xqc_test_wlb_acked_path_not_evicted)
         || !CU_add_test(pSuite, "xqc_test_wlb_routine_path_event_preserves_round", xqc_test_wlb_routine_path_event_preserves_round)
         || !CU_add_test(pSuite, "xqc_test_wlb_measured_goodput_ignores_loss_penalty", xqc_test_wlb_measured_goodput_ignores_loss_penalty)
         || !CU_add_test(pSuite, "xqc_test_wlb_idle_path_goodput_decays", xqc_test_wlb_idle_path_goodput_decays)

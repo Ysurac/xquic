@@ -4262,6 +4262,45 @@ grep_err_log
 
 
 killall test_server
+${SERVER_BIN} -l d -e -M -Q 65535 -U 1 > /dev/null &
+sleep 1
+
+rm -rf tp_localhost test_session xqc_token
+clear_log
+echo -e "MP datagrams leave a silently failed path ...\c"
+sudo ${CLIENT_BIN} -l d -t 3 -M -i lo -i lo -x 1300 -Q 65535 -U 1 -T 1 -e 1000 --epoch_timeout 20000 > stdlog
+result=`grep "\[dgram\]|silent_path|sent:" stdlog`
+max_gap=`echo "$result" | sed -n 's/.*|max_gap_ms:\([0-9]*\)|.*/\1/p'`
+cli_res=`grep -E "xqc_conn_destroy.*mp_enable:1" clog`
+errlog=`grep_err_log`
+if [ -z "$errlog" ] && [ -n "$max_gap" ] && [ "$max_gap" -lt 1000 ] && [ -n "$cli_res" ]; then
+    echo ">>>>>>>> pass:1"
+    case_print_result "MP_datagrams_leave_silently_failed_path" "pass"
+else
+    echo ">>>>>>>> pass:0"
+    case_print_result "MP_datagrams_leave_silently_failed_path" "fail"
+fi
+grep_err_log
+
+rm -rf tp_localhost test_session xqc_token
+clear_log
+echo -e "MP datagrams resume after every path failed silently ...\c"
+sudo ${CLIENT_BIN} -l d -t 3 -M -i lo -i lo -x 1301 -Q 65535 -U 1 -T 1 -e 1000 --epoch_timeout 20000 > stdlog
+result=`grep "\[dgram\]|silent_path|sent:" stdlog`
+resume=`echo "$result" | sed -n 's/.*|resume_ms:\([0-9]*\)|.*/\1/p'`
+cli_res=`grep -E "xqc_conn_destroy.*mp_enable:1" clog`
+errlog=`grep_err_log`
+if [ -z "$errlog" ] && [ -n "$resume" ] && [ "$resume" -lt 2000 ] && [ -n "$cli_res" ]; then
+    echo ">>>>>>>> pass:1"
+    case_print_result "MP_datagrams_resume_after_all_paths_failed_silently" "pass"
+else
+    echo ">>>>>>>> pass:0"
+    case_print_result "MP_datagrams_resume_after_all_paths_failed_silently" "fail"
+fi
+grep_err_log
+
+
+killall test_server
 stdbuf -oL ${SERVER_BIN} -l d -e -M -Q 65535 -U 1 --pmtud 1 -x 200 > svr_stdlog &
 sleep 1
 

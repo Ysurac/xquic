@@ -1050,6 +1050,92 @@ xqc_test_wlb_unpinned_blackhole_refreshes_topology(void)
     wlb_test_teardown(&f);
 }
 
+/*
+ * A path that silently stops delivering while datagrams keep going out on it
+ * never gets a PTO: every ack-eliciting packet sent restarts the timer
+ * (RFC 9002 Section 6.2.1), so ctl_pto_count stays 0. WLB evicts it once
+ * those sends have hidden WLB_PTO_EVICT_THRESH (3) PTO expiries, the third
+ * coming 7 PTOs after the last progress.
+ */
+static xqc_usec_t
+wlb_test_mark_unacked_since(wlb_test_fixture_t *f, xqc_path_ctx_t *p,
+    xqc_usec_t since)
+{
+    xqc_send_ctl_t *ctl = p->path_send_ctl;
+
+    f->conn.conn_flag |= XQC_CONN_FLAG_HANDSHAKE_CONFIRMED;
+    f->conn.conn_settings.pto_backoff_factor = 2.0;
+    f->conn.remote_settings.max_ack_delay = 25;
+    ctl->ctl_bytes_in_flight = 4000;
+    ctl->ctl_bytes_ack_eliciting_inflight[XQC_PNS_APP_DATA] = 4000;
+    ctl->ctl_progress_time = since;
+
+    /* 25 ms srtt + max(4 * 0, 2 ms) + 25 ms max_ack_delay */
+    return xqc_send_ctl_calc_pto(ctl);
+}
+
+void
+xqc_test_wlb_unresponsive_path_evicted_before_pto(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    xqc_path_ctx_t *relay = wlb_test_add_path(&f, 1, 25000, 64 * 1024, 0);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(relay);
+    (void)wlb_test_invoke(&f, UINT32_MAX);
+
+    xqc_usec_t pto = wlb_test_mark_unacked_since(&f, relay, g_fake_now_us);
+    CU_ASSERT_EQUAL(pto, 52000);
+    /* datagrams kept going out on the relay for 7 PTOs, unacknowledged */
+    wlb_test_clock_advance(7 * pto);
+    relay->path_send_ctl->ctl_time_of_last_sent_ack_eliciting_packet[
+        XQC_PNS_APP_DATA] = g_fake_now_us;
+    CU_ASSERT_EQUAL(relay->path_send_ctl->ctl_pto_count, 0);
+
+    for (int i = 0; i < 32; i++) {
+        CU_ASSERT_EQUAL(wlb_test_invoke(&f, UINT32_MAX), 0);
+    }
+    CU_ASSERT_EQUAL(wlb_test_invoke_stream(&f), 0);
+
+    wlb_test_teardown(&f);
+}
+
+/* The same path with an ACK of a packet sent on it within the last PTO keeps
+ * its share of the unpinned datagrams. */
+void
+xqc_test_wlb_acked_path_not_evicted(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    xqc_path_ctx_t *relay = wlb_test_add_path(&f, 1, 25000, 64 * 1024, 0);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(relay);
+    (void)wlb_test_invoke(&f, UINT32_MAX);
+
+    xqc_usec_t pto = wlb_test_mark_unacked_since(&f, relay, g_fake_now_us);
+    wlb_test_clock_advance(7 * pto);
+    relay->path_send_ctl->ctl_time_of_last_sent_ack_eliciting_packet[
+        XQC_PNS_APP_DATA] = g_fake_now_us;
+    relay->path_send_ctl->ctl_progress_time = g_fake_now_us - pto / 2;
+
+    int on_direct = 0;
+    int on_relay = 0;
+    for (int i = 0; i < 32; i++) {
+        uint64_t selected = wlb_test_invoke(&f, UINT32_MAX);
+        if (selected == 0) {
+            on_direct++;
+        } else if (selected == 1) {
+            on_relay++;
+        }
+    }
+    CU_ASSERT_TRUE(on_direct > 0);
+    CU_ASSERT_TRUE(on_relay > 0);
+
+    wlb_test_teardown(&f);
+}
+
 void
 xqc_test_wlb_routine_path_event_preserves_round(void)
 {
