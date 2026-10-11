@@ -132,6 +132,7 @@ if(HAVE_CUNIT)
         ${UNIT_TEST_DIR}/xqc_wrr_test.c
         ${UNIT_TEST_DIR}/xqc_redundant_test.c
         ${UNIT_TEST_DIR}/xqc_dscp_test.c
+        ${UNIT_TEST_DIR}/xqc_scheduler_standby_test.c
         ${UNIT_TEST_DIR}/xqc_send_ctl_test.c
         ${UNIT_TEST_DIR}/xqc_vn_test.c
         ${UNIT_TEST_DIR}/xqc_frame_type_bit_test.c

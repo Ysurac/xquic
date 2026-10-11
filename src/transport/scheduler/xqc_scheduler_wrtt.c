@@ -9,6 +9,10 @@
  *   3. When the best path is cwnd-blocked, the next-best path takes the
  *      packet — providing bandwidth aggregation without round-robin.
  *
+ * Standby paths (PATH_STATUS_BACKUP) are not usable while an available path
+ * of the same or a better performance class exists, whatever their weight
+ * (xqc_scheduler_standby_skip, the rule of the backup scheduler).
+ *
  * No scheduler state is needed: the algorithm is a single pass over the
  * path list on every call, identical in structure to MinRTT but with
  * weight as the primary sort key.
@@ -42,7 +46,8 @@ xqc_wrtt_scheduler_init(void *scheduler, xqc_log_t *log, xqc_scheduler_params_t 
 /* ------------------------------------------------------------------ */
 
 static xqc_bool_t
-wrtt_path_is_usable(xqc_path_ctx_t *path, int reinject, xqc_packet_out_t *packet_out)
+wrtt_path_is_usable(xqc_path_ctx_t *path, int reinject, xqc_packet_out_t *packet_out,
+    const xqc_sched_standby_filter_t *standby)
 {
     return path->path_state == XQC_PATH_STATE_ACTIVE
         && path->app_path_status != XQC_APP_PATH_STATUS_FROZEN
@@ -50,7 +55,8 @@ wrtt_path_is_usable(xqc_path_ctx_t *path, int reinject, xqc_packet_out_t *packet
         && !(path->path_send_ctl
              && xqc_send_ctl_get_effective_pto_count(path->path_send_ctl,
                     xqc_monotonic_timestamp()) >= WRTT_PTO_SKIP_THRESH)
-        && !(reinject && path->path_id == packet_out->po_path_id);
+        && !(reinject && path->path_id == packet_out->po_path_id)
+        && !xqc_scheduler_standby_skip(standby, path);
 }
 
 /*
@@ -78,11 +84,14 @@ wrtt_select(xqc_connection_t *conn, xqc_packet_out_t *packet_out,
 
     xqc_list_head_t *pos, *next;
     xqc_path_ctx_t  *path;
+    xqc_sched_standby_filter_t standby;
+
+    xqc_scheduler_standby_filter_init(&standby, conn, reinject);
 
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
 
-        if (!wrtt_path_is_usable(path, reinject, packet_out)) {
+        if (!wrtt_path_is_usable(path, reinject, packet_out, &standby)) {
             continue;
         }
 

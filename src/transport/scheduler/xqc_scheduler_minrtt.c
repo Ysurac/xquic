@@ -36,6 +36,7 @@ xqc_minrtt_scheduler_get_path(void *scheduler,
     uint64_t path_srtt = 0;
     xqc_bool_t reached_cwnd_check = XQC_FALSE;
     xqc_bool_t path_can_send = XQC_FALSE;
+    xqc_sched_standby_filter_t standby;
 
     for (path_class = XQC_PATH_CLASS_AVAILABLE_HIGH; 
          path_class < XQC_PATH_CLASS_PERF_CLASS_SIZE; 
@@ -48,6 +49,8 @@ xqc_minrtt_scheduler_get_path(void *scheduler,
         *cc_blocked = XQC_FALSE;
     }
 
+    xqc_scheduler_standby_filter_init(&standby, conn, reinject);
+
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
 
@@ -59,6 +62,11 @@ xqc_minrtt_scheduler_get_path(void *scheduler,
             || path->app_path_status == XQC_APP_PATH_STATUS_FROZEN
             || (reinject && (packet_out->po_path_id == path->path_id)))
         {
+            goto skip_path;
+        }
+
+        /* skip standby paths while an available path can take the data */
+        if (xqc_scheduler_standby_skip(&standby, path)) {
             goto skip_path;
         }
 

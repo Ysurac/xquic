@@ -56,6 +56,15 @@
  *   when that path can send.  The wipe is gated on ever_lost_path so that a
  *   secondary path coming up during initial setup does not trigger it.
  *
+ * Standby paths:
+ *   A standby path (PATH_STATUS_BACKUP, draft-ietf-quic-multipath-21) is
+ *   held back like an evicted one while an ACTIVE available path of the
+ *   same or a better performance class exists -- the backup scheduler's
+ *   rule, see xqc_scheduler_standby_skip: it gets no WRR share, no pins, no
+ *   MinRTT traffic and no recovery probe, and flows pinned to it move off.
+ *   Once no such available path remains it rejoins through the path-set
+ *   refresh like any new path. Reinjected replicas may still use it.
+ *
  * Soft pinning (cwnd-blocked spillover):
  *   When a flow's pinned path is temporarily cwnd-blocked, the packet is
  *   sent on another path via WRR WITHOUT updating the flow table.  The
@@ -183,11 +192,19 @@ typedef struct {
      * after handshake), which otherwise wipes the freshly-established pin and
      * re-pins all TCP flows to the just-added — possibly narrow — path. */
     xqc_bool_t           ever_lost_path;
+    /* Standby paths held back for this call (see wlb_path_standby_held).
+     * Rebuilt at the start of every xqc_wlb_scheduler_get_path call and only
+     * read during it. */
+    xqc_sched_standby_filter_t standby;
     xqc_log_t           *log;
 } xqc_wlb_scheduler_t;
 
-/* Forward declaration — used by wlb_flow_expire() for loss-triggered eviction */
-static xqc_path_ctx_t *wlb_find_path_ctx(xqc_connection_t *conn, uint64_t path_id);
+/* Forward declarations — used by wlb_flow_expire() */
+static xqc_bool_t wlb_path_standby_held(xqc_wlb_scheduler_t *s,
+                                        xqc_path_ctx_t *path);
+static xqc_path_ctx_t *wlb_find_path_ctx(xqc_wlb_scheduler_t *s,
+                                         xqc_connection_t *conn,
+                                         uint64_t path_id);
 
 /* ================================================================
  *  Flow table helpers
@@ -324,6 +341,13 @@ wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
         {
             continue;
         }
+        /* A standby path held back behind an available one is not part of
+         * the usable set either; when it takes over (the available path is
+         * lost) and when it is held back again (the available path
+         * returns), the set change drives the usual loss/recovery logic. */
+        if (wlb_path_standby_held(s, scan_path)) {
+            continue;
+        }
         active_healthy_paths++;
         if (active_healthy_ids_n < WLB_MAX_PATHS) {
             active_healthy_ids[active_healthy_ids_n++] = scan_path->path_id;
@@ -451,10 +475,10 @@ wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
         }
 
         /* Check pinned path status */
-        xqc_path_ctx_t *path = wlb_find_path_ctx(conn, e->path_id);
+        xqc_path_ctx_t *path = wlb_find_path_ctx(s, conn, e->path_id);
         if (!path) {
-            /* Path gone or no longer schedulable (wlb_path_schedulable)
-             * → evict immediately */
+            /* Path gone or no longer schedulable (wlb_path_schedulable),
+             * including a standby path held back → evict immediately */
             e->hash = WLB_FLOW_TOMBSTONE;
             continue;
         }
@@ -474,7 +498,8 @@ wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
  * predicate and the recovery-probe picker build on this, so a new
  * disqualifier added here cannot be missed by one of them. It CAN be missed
  * by wlb_flow_expire's healthy-path scan and by wlb_minrtt_fallback, which
- * still spell the same conditions out inline -- add it there as well. */
+ * still spell the same conditions out inline -- add it there as well.
+ * The same holds for wlb_path_standby_held, which all four test. */
 static xqc_bool_t
 wlb_path_transport_ok(xqc_path_ctx_t *path)
 {
@@ -493,10 +518,24 @@ wlb_path_blackholed(xqc_path_ctx_t *path)
                   xqc_monotonic_timestamp()) >= WLB_PTO_EVICT_THRESH;
 }
 
+/* A standby (PATH_STATUS_BACKUP) path that must not get new data because an
+ * available path of the same or a better performance class exists -- the
+ * rule of the backup scheduler, see xqc_scheduler_standby_skip. Such a path
+ * is out of the WRR set and the flow table exactly like an evicted one, so
+ * a flow pinned to a path that turns standby moves off it, and the path
+ * comes back through the normal path-set refresh when the available paths
+ * are gone. */
 static xqc_bool_t
-wlb_path_schedulable(xqc_path_ctx_t *path)
+wlb_path_standby_held(xqc_wlb_scheduler_t *s, xqc_path_ctx_t *path)
 {
-    return wlb_path_transport_ok(path) && !wlb_path_blackholed(path);
+    return xqc_scheduler_standby_skip(&s->standby, path);
+}
+
+static xqc_bool_t
+wlb_path_schedulable(xqc_wlb_scheduler_t *s, xqc_path_ctx_t *path)
+{
+    return wlb_path_transport_ok(path) && !wlb_path_blackholed(path)
+           && !wlb_path_standby_held(s, path);
 }
 
 /**
@@ -508,13 +547,14 @@ wlb_path_schedulable(xqc_path_ctx_t *path)
  * causes WLB to keep selecting it and stall throughput after link-down.
  */
 static xqc_path_ctx_t *
-wlb_find_path_ctx(xqc_connection_t *conn, uint64_t path_id)
+wlb_find_path_ctx(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
+                  uint64_t path_id)
 {
     xqc_list_head_t *pos, *next;
     xqc_path_ctx_t  *path;
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-        if (path->path_id == path_id && wlb_path_schedulable(path)) {
+        if (path->path_id == path_id && wlb_path_schedulable(s, path)) {
             return path;
         }
     }
@@ -664,7 +704,7 @@ wlb_active_paths_match_cache(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
     xqc_path_ctx_t *path;
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-        if (!wlb_path_schedulable(path)) {
+        if (!wlb_path_schedulable(s, path)) {
             continue;
         }
         if (n >= s->n_paths || s->paths[n].path_id != path->path_id) {
@@ -791,7 +831,7 @@ wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
     int n = 0;
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-        if (!wlb_path_schedulable(path)) {
+        if (!wlb_path_schedulable(s, path)) {
             continue;
         }
         if (n >= WLB_MAX_PATHS) {
@@ -889,7 +929,7 @@ wlb_pick_pin_path(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
     int64_t best_deficit = INT64_MIN;
     int64_t total_weight = 0;
     for (int i = 0; i < s->n_paths; i++) {
-        xqc_path_ctx_t *path = wlb_find_path_ctx(conn, s->paths[i].path_id);
+        xqc_path_ctx_t *path = wlb_find_path_ctx(s, conn, s->paths[i].path_id);
         if (path == NULL) {
             continue;
         }
@@ -919,7 +959,7 @@ wlb_wrr_select(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
     int64_t total_weight = 0;
 
     for (int i = 0; i < s->n_paths; i++) {
-        xqc_path_ctx_t *path = wlb_find_path_ctx(conn, s->paths[i].path_id);
+        xqc_path_ctx_t *path = wlb_find_path_ctx(s, conn, s->paths[i].path_id);
         if (path == NULL) {
             continue;
         }
@@ -956,8 +996,9 @@ wlb_wrr_select(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
  * ================================================================ */
 
 static xqc_path_ctx_t *
-wlb_minrtt_fallback(xqc_connection_t *conn, xqc_packet_out_t *packet_out,
-                     int check_cwnd, int reinject, xqc_bool_t *cc_blocked)
+wlb_minrtt_fallback(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
+                    xqc_packet_out_t *packet_out, int check_cwnd,
+                    int reinject, xqc_bool_t *cc_blocked)
 {
     xqc_path_ctx_t *best_path = NULL;
     uint64_t best_srtt = UINT64_MAX;
@@ -987,6 +1028,12 @@ wlb_minrtt_fallback(xqc_connection_t *conn, xqc_packet_out_t *packet_out,
             && xqc_send_ctl_get_effective_pto_count(path->path_send_ctl,
                    xqc_monotonic_timestamp()) >= WLB_PTO_EVICT_THRESH)
         {
+            continue;
+        }
+
+        /* Standby paths stay idle while an available path exists (the
+         * filter is inactive for reinjection, so replicas may use them). */
+        if (wlb_path_standby_held(s, path)) {
             continue;
         }
 
@@ -1113,7 +1160,9 @@ wlb_pick_evicted_probe(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
     int n = 0;
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-        if (!wlb_path_transport_ok(path) || !wlb_path_blackholed(path)) {
+        if (!wlb_path_transport_ok(path) || !wlb_path_blackholed(path)
+            || wlb_path_standby_held(s, path))
+        {
             continue;
         }
         if (n < WLB_MAX_PATHS) {
@@ -1161,12 +1210,15 @@ xqc_wlb_scheduler_get_path(void *scheduler,
 {
     xqc_wlb_scheduler_t *s = (xqc_wlb_scheduler_t *)scheduler;
 
+    /* Every path predicate below consults this; reinjection disables it. */
+    xqc_scheduler_standby_filter_init(&s->standby, conn, reinject);
+
     /* Replicas exist to ride a DIFFERENT path than their origin; flow
      * pinning (ordering protection) is meaningless for a duplicate. Route
      * every reinjection query through the fallback, which already excludes
      * the origin path and checks cwnd. */
     if (reinject) {
-        return wlb_minrtt_fallback(conn, packet_out, check_cwnd, reinject, cc_blocked);
+        return wlb_minrtt_fallback(s, conn, packet_out, check_cwnd, reinject, cc_blocked);
     }
 
     /* Everything without a flow hash -- STREAM data and control packets --
@@ -1199,7 +1251,7 @@ xqc_wlb_scheduler_get_path(void *scheduler,
      * a missed aggregation -- netem-shaped, the stream lane reaches ~96% of
      * the sum of its single-path legs on MinRTT. */
     if (packet_out->po_flow_hash == 0) {
-        return wlb_minrtt_fallback(conn, packet_out, check_cwnd, reinject, cc_blocked);
+        return wlb_minrtt_fallback(s, conn, packet_out, check_cwnd, reinject, cc_blocked);
     }
 
     if (cc_blocked) {
@@ -1277,7 +1329,7 @@ xqc_wlb_scheduler_get_path(void *scheduler,
     if (pin_flow && !in_recovery_grace) {
         wlb_flow_entry_t *entry = wlb_flow_lookup(s, packet_out->po_flow_hash);
         if (entry) {
-            xqc_path_ctx_t *path = wlb_find_path_ctx(conn, entry->path_id);
+            xqc_path_ctx_t *path = wlb_find_path_ctx(s, conn, entry->path_id);
 
             /* Drop a pin whose path can no longer carry payload -- removed,
              * frozen, socket error, or unresponsive for several consecutive
@@ -1323,7 +1375,7 @@ xqc_wlb_scheduler_get_path(void *scheduler,
      * surviving-path flow migrate back instead of immediately re-pinning to the
      * already-hot path. */
     if (pin_flow && in_recovery_grace && s->recovery_prefer_path_id != WLB_NO_PATH_ID) {
-        xqc_path_ctx_t *rpath = wlb_find_path_ctx(conn, s->recovery_prefer_path_id);
+        xqc_path_ctx_t *rpath = wlb_find_path_ctx(s, conn, s->recovery_prefer_path_id);
         if (rpath && xqc_scheduler_check_path_can_send(rpath, packet_out, check_cwnd)) {
             wlb_flow_insert(s, packet_out->po_flow_hash, rpath->path_id, now_us);
             xqc_log(conn->log, XQC_LOG_INFO,
@@ -1335,12 +1387,12 @@ xqc_wlb_scheduler_get_path(void *scheduler,
     }
 
     if (s->n_paths == 0) {
-        return wlb_minrtt_fallback(conn, packet_out, check_cwnd, reinject, cc_blocked);
+        return wlb_minrtt_fallback(s, conn, packet_out, check_cwnd, reinject, cc_blocked);
     }
 
     /* Single active path — skip WRR overhead */
     if (s->n_paths == 1) {
-        xqc_path_ctx_t *path = wlb_find_path_ctx(conn, s->paths[0].path_id);
+        xqc_path_ctx_t *path = wlb_find_path_ctx(s, conn, s->paths[0].path_id);
         if (path && xqc_scheduler_check_path_can_send(path, packet_out, check_cwnd)) {
             /* Single-path period: do NOT pin. Once the secondary path appears
              * in s->paths, the next packet of this flow misses the flow-table
@@ -1386,7 +1438,7 @@ xqc_wlb_scheduler_get_path(void *scheduler,
                     "|wlb|flow_pin|flow:%ui|pin:%ui|send:%ui|",
                     packet_out->po_flow_hash, pin_path_id, sel_path_id);
         }
-        xqc_path_ctx_t *path = wlb_find_path_ctx(conn, sel_path_id);
+        xqc_path_ctx_t *path = wlb_find_path_ctx(s, conn, sel_path_id);
         xqc_log(conn->log, XQC_LOG_INFO,
                  "|wlb|select|path_id:%ui|n_paths:%d|pinned:%d|",
                  sel_path_id, s->n_paths, (int)pin_flow);

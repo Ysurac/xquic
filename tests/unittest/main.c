@@ -53,6 +53,7 @@
 #include "xqc_wrr_test.h"
 #include "xqc_redundant_test.h"
 #include "xqc_dscp_test.h"
+#include "xqc_scheduler_standby_test.h"
 #include "xqc_send_ctl_test.h"
 #include "xqc_vn_test.h"
 #include "xqc_frame_type_bit_test.h"
@@ -469,6 +470,12 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_wlb_application_delivery_advances_learning", xqc_test_wlb_application_delivery_advances_learning)
         || !CU_add_test(pSuite, "xqc_test_wlb_rejected_0rtt_does_not_advance_learning", xqc_test_wlb_rejected_0rtt_does_not_advance_learning)
         || !CU_add_test(pSuite, "xqc_test_wlb_duplicate_ack_counts_application_once", xqc_test_wlb_duplicate_ack_counts_application_once)
+        || !CU_add_test(pSuite, "xqc_test_standby_wlb_backup_idle_until_primary_lost", xqc_test_standby_wlb_backup_idle_until_primary_lost)
+        || !CU_add_test(pSuite, "xqc_test_standby_wlb_pinned_flow_leaves_path_turning_standby", xqc_test_standby_wlb_pinned_flow_leaves_path_turning_standby)
+        || !CU_add_test(pSuite, "xqc_test_standby_wlb_blocked_primary_does_not_spill", xqc_test_standby_wlb_blocked_primary_does_not_spill)
+        || !CU_add_test(pSuite, "xqc_test_standby_wlb_reinject_may_use_standby", xqc_test_standby_wlb_reinject_may_use_standby)
+        || !CU_add_test(pSuite, "xqc_test_standby_perf_class_rule", xqc_test_standby_perf_class_rule)
+        || !CU_add_test(pSuite, "xqc_test_standby_other_schedulers", xqc_test_standby_other_schedulers)
         /* ADD TESTS HERE */)
     {
         CU_cleanup_registry();

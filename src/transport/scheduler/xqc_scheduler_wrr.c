@@ -35,6 +35,10 @@
  * touch the WRR state, so control traffic (ACKs, handshake) always takes
  * the lowest-latency path instead of being spread thin by the rotation.
  *
+ * Standby paths (PATH_STATUS_BACKUP) are not usable while an available path
+ * of the same or a better performance class exists, whatever their weight
+ * (xqc_scheduler_standby_skip, the rule of the backup scheduler).
+ *
  * Weights are read live from path->path_weight on every call (same field
  * WRTT uses, set via xqc_conn_set_path_weight()). weight=0 is treated as
  * weight=1 (equal priority).
@@ -76,7 +80,8 @@ xqc_wrr_scheduler_init(void *scheduler, xqc_log_t *log, xqc_scheduler_params_t *
 /* ------------------------------------------------------------------ */
 
 static xqc_bool_t
-wrr_path_is_usable(xqc_path_ctx_t *path, int reinject, xqc_packet_out_t *packet_out)
+wrr_path_is_usable(xqc_path_ctx_t *path, int reinject, xqc_packet_out_t *packet_out,
+    const xqc_sched_standby_filter_t *standby)
 {
     return path->path_state == XQC_PATH_STATE_ACTIVE
         && path->app_path_status != XQC_APP_PATH_STATUS_FROZEN
@@ -84,7 +89,8 @@ wrr_path_is_usable(xqc_path_ctx_t *path, int reinject, xqc_packet_out_t *packet_
         && !(path->path_send_ctl
              && xqc_send_ctl_get_effective_pto_count(path->path_send_ctl,
                     xqc_monotonic_timestamp()) >= WRR_PTO_SKIP_THRESH)
-        && !(reinject && path->path_id == packet_out->po_path_id);
+        && !(reinject && path->path_id == packet_out->po_path_id)
+        && !xqc_scheduler_standby_skip(standby, path);
 }
 
 /* Find the persistent weight-state slot for path_id, creating one
@@ -143,11 +149,14 @@ wrr_select(xqc_wrr_scheduler_t *s, xqc_connection_t *conn,
     int64_t           total_weight    = 0;
     xqc_bool_t        any_usable      = XQC_FALSE;
     xqc_bool_t        any_sendable    = XQC_FALSE;
+    xqc_sched_standby_filter_t standby;
+
+    xqc_scheduler_standby_filter_init(&standby, conn, reinject);
 
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
 
-        if (!wrr_path_is_usable(path, reinject, packet_out)) {
+        if (!wrr_path_is_usable(path, reinject, packet_out, &standby)) {
             continue;
         }
         any_usable = XQC_TRUE;
@@ -206,11 +215,14 @@ wrr_minrtt_select(xqc_connection_t *conn, xqc_packet_out_t *packet_out,
 
     xqc_list_head_t *pos, *next;
     xqc_path_ctx_t  *path;
+    xqc_sched_standby_filter_t standby;
+
+    xqc_scheduler_standby_filter_init(&standby, conn, reinject);
 
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
 
-        if (!wrr_path_is_usable(path, reinject, packet_out)) {
+        if (!wrr_path_is_usable(path, reinject, packet_out, &standby)) {
             continue;
         }
         any_usable = XQC_TRUE;

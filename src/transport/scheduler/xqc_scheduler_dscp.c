@@ -18,6 +18,11 @@
  *      always use plain MinRTT across every usable path, ignoring masks
  *      entirely.
  *
+ * Standby paths (PATH_STATUS_BACKUP) are not candidates, even for a class
+ * their mask names, while an available path of the same or a better
+ * performance class exists (xqc_scheduler_standby_skip, the rule of the
+ * backup scheduler); tagged traffic then takes the MinRTT fallback.
+ *
  * No scheduler state is needed: like WRTT, this is a single pass (two at
  * most, for the tagged-with-fallback case) over the path list on every
  * call. DSCP masks and weights are independent knobs — a path can carry
@@ -49,7 +54,8 @@ xqc_dscp_scheduler_init(void *scheduler, xqc_log_t *log, xqc_scheduler_params_t 
 /* ------------------------------------------------------------------ */
 
 static xqc_bool_t
-dscp_path_is_usable(xqc_path_ctx_t *path, int reinject, xqc_packet_out_t *packet_out)
+dscp_path_is_usable(xqc_path_ctx_t *path, int reinject, xqc_packet_out_t *packet_out,
+    const xqc_sched_standby_filter_t *standby)
 {
     return path->path_state == XQC_PATH_STATE_ACTIVE
         && path->app_path_status != XQC_APP_PATH_STATUS_FROZEN
@@ -57,7 +63,8 @@ dscp_path_is_usable(xqc_path_ctx_t *path, int reinject, xqc_packet_out_t *packet
         && !(path->path_send_ctl
              && xqc_send_ctl_get_effective_pto_count(path->path_send_ctl,
                     xqc_monotonic_timestamp()) >= DSCP_PTO_SKIP_THRESH)
-        && !(reinject && path->path_id == packet_out->po_path_id);
+        && !(reinject && path->path_id == packet_out->po_path_id)
+        && !xqc_scheduler_standby_skip(standby, path);
 }
 
 /*
@@ -69,6 +76,7 @@ dscp_path_is_usable(xqc_path_ctx_t *path, int reinject, xqc_packet_out_t *packet
 static xqc_path_ctx_t *
 dscp_pick_minrtt(xqc_connection_t *conn, xqc_packet_out_t *packet_out,
                   int check_cwnd, int reinject, uint64_t required_mask,
+                  const xqc_sched_standby_filter_t *standby,
                   xqc_bool_t *cc_blocked)
 {
     xqc_path_ctx_t *best = NULL;
@@ -82,7 +90,7 @@ dscp_pick_minrtt(xqc_connection_t *conn, xqc_packet_out_t *packet_out,
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
 
-        if (!dscp_path_is_usable(path, reinject, packet_out)) {
+        if (!dscp_path_is_usable(path, reinject, packet_out, standby)) {
             continue;
         }
 
@@ -122,11 +130,14 @@ xqc_dscp_scheduler_get_path(void *scheduler,
     int check_cwnd, int reinject, xqc_bool_t *cc_blocked)
 {
     uint8_t dscp = packet_out->po_dscp;
+    xqc_sched_standby_filter_t standby;
+
+    xqc_scheduler_standby_filter_init(&standby, conn, reinject);
 
     if (dscp == 0) {
         /* Untagged (default), and every non-datagram control packet. */
         xqc_path_ctx_t *path = dscp_pick_minrtt(conn, packet_out, check_cwnd,
-                                                 reinject, 0, cc_blocked);
+                                                 reinject, 0, &standby, cc_blocked);
 
         xqc_log(conn->log, XQC_LOG_DEBUG,
                 "|dscp|select|untagged|path_id:%i|",
@@ -136,7 +147,7 @@ xqc_dscp_scheduler_get_path(void *scheduler,
 
     uint64_t mask = 1ULL << (dscp & 0x3F);
     xqc_path_ctx_t *path = dscp_pick_minrtt(conn, packet_out, check_cwnd,
-                                             reinject, mask, cc_blocked);
+                                             reinject, mask, &standby, cc_blocked);
     if (path != NULL) {
         xqc_log(conn->log, XQC_LOG_DEBUG,
                 "|dscp|select|dscp:%ud|path_id:%ui|dedicated|", dscp, path->path_id);
@@ -145,7 +156,7 @@ xqc_dscp_scheduler_get_path(void *scheduler,
 
     /* No dedicated path currently usable for this class: degrade to plain
      * MinRTT across every path instead of stalling the traffic. */
-    path = dscp_pick_minrtt(conn, packet_out, check_cwnd, reinject, 0, cc_blocked);
+    path = dscp_pick_minrtt(conn, packet_out, check_cwnd, reinject, 0, &standby, cc_blocked);
 
     xqc_log(conn->log, XQC_LOG_DEBUG,
             "|dscp|select|dscp:%ud|path_id:%i|fallback_minrtt|", dscp,

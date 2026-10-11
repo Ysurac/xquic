@@ -36,10 +36,13 @@ xqc_rap_scheduler_get_path(void *scheduler,
     uint64_t min_rtt = XQC_MAX_UINT64_VALUE;
     uint64_t path_srtt;
     xqc_bool_t reached_cwnd_check = XQC_FALSE;
+    xqc_sched_standby_filter_t standby;
 
     if (cc_blocked) {
         *cc_blocked = XQC_FALSE;
     }
+
+    xqc_scheduler_standby_filter_init(&standby, conn, reinject);
 
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
@@ -50,6 +53,11 @@ xqc_rap_scheduler_get_path(void *scheduler,
 
         /* skip the frozen path */
         if (path->app_path_status == XQC_APP_PATH_STATUS_FROZEN) {
+            continue;
+        }
+
+        /* skip standby paths while an available path can take the data */
+        if (xqc_scheduler_standby_skip(&standby, path)) {
             continue;
         }
 
