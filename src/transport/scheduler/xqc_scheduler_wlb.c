@@ -58,10 +58,9 @@
  *
  * Standby paths:
  *   A standby path (PATH_STATUS_BACKUP, draft-ietf-quic-multipath-21) is
- *   held back like an evicted one while an ACTIVE available path of the
- *   same or a better performance class exists -- the backup scheduler's
- *   rule, see xqc_scheduler_standby_skip: it gets no WRR share, no pins, no
- *   MinRTT traffic and no recovery probe, and flows pinned to it move off.
+ *   held back like an evicted one while a working available path exists
+ *   (xqc_scheduler_standby_skip): it gets no WRR share, no pins, no MinRTT
+ *   traffic and no recovery probe, and flows pinned to it move off.
  *   Once no such available path remains it rejoins through the path-set
  *   refresh like any new path. Reinjected replicas may still use it.
  *
@@ -518,9 +517,8 @@ wlb_path_blackholed(xqc_path_ctx_t *path)
                   xqc_monotonic_timestamp()) >= WLB_PTO_EVICT_THRESH;
 }
 
-/* A standby (PATH_STATUS_BACKUP) path that must not get new data because an
- * available path of the same or a better performance class exists -- the
- * rule of the backup scheduler, see xqc_scheduler_standby_skip. Such a path
+/* A standby (PATH_STATUS_BACKUP) path that must not get new data because a
+ * working available path exists, see xqc_scheduler_standby_skip. Such a path
  * is out of the WRR set and the flow table exactly like an evicted one, so
  * a flow pinned to a path that turns standby moves off it, and the path
  * comes back through the normal path-set refresh when the available paths

@@ -222,9 +222,7 @@ xqc_test_standby_wlb_backup_idle_until_primary_lost(void)
     sb_fixture_t f;
     sb_setup(&f, &xqc_wlb_scheduler_cb);
 
-    /* The backup has the lower RTT, so only its status keeps it idle. Not
-     * below a third of the primary's: that would drop the primary to the
-     * MID class and free a HIGH standby path (sb_perf_class_case). */
+    /* the backup has the lower RTT: only its status keeps it idle */
     xqc_path_ctx_t *primary = sb_add_path(&f, 0, 20000, XQC_APP_PATH_STATUS_AVAILABLE);
     xqc_path_ctx_t *backup = sb_add_path(&f, 1, 10000, XQC_APP_PATH_STATUS_STANDBY);
     (void)backup;
@@ -335,8 +333,8 @@ sb_perf_class_case(const xqc_scheduler_callback_t *cb)
 {
     sb_fixture_t f;
 
-    /* available path LOW (srtt above rtt_us_thr_high), standby HIGH: the
-     * standby path is the better class and is used */
+    /* available path LOW (failing: srtt above rtt_us_thr_high), standby
+     * HIGH: the standby path is the better class and is used */
     sb_setup(&f, cb);
     sb_add_path(&f, 0, 3000000, XQC_APP_PATH_STATUS_AVAILABLE);
     sb_add_path(&f, 1, 20000, XQC_APP_PATH_STATUS_STANDBY);
@@ -344,12 +342,24 @@ sb_perf_class_case(const xqc_scheduler_callback_t *cb)
     CU_ASSERT(sb_unpinned_hits(&f, 1, 20) > 0);
     sb_teardown(&f);
 
-    /* available path MID (srtt above 3x the connection's min srtt, which
-     * the standby path sets), standby HIGH: the standby path is used */
+    /* available path MID because loaded (srtt above 3x the connection's
+     * min srtt, which the idle standby path sets), standby HIGH: held back,
+     * unlike under the backup scheduler */
     sb_setup(&f, cb);
     sb_add_path(&f, 0, 40000, XQC_APP_PATH_STATUS_AVAILABLE);
     sb_add_path(&f, 1, 10000, XQC_APP_PATH_STATUS_STANDBY);
-    CU_ASSERT_EQUAL(sb_invoke(&f, SB_PKT_STREAM, 0), 1);
+    CU_ASSERT_EQUAL(sb_invoke(&f, SB_PKT_STREAM, 0), 0);
+    CU_ASSERT_EQUAL(sb_unpinned_hits(&f, 1, 20), 0);
+    sb_teardown(&f);
+
+    /* available path MID because slow (bandwidth estimate under
+     * bw_Bps_thr), standby HIGH: held back */
+    sb_setup(&f, cb);
+    sb_add_path(&f, 0, 20000, XQC_APP_PATH_STATUS_AVAILABLE);
+    sb_add_path(&f, 1, 20000, XQC_APP_PATH_STATUS_STANDBY);
+    f.cong[0].bandwidth_Bps = 100000;
+    CU_ASSERT_EQUAL(sb_invoke(&f, SB_PKT_STREAM, 0), 0);
+    CU_ASSERT_EQUAL(sb_unpinned_hits(&f, 1, 20), 0);
     sb_teardown(&f);
 
     /* both MID (a FROZEN path still sets the min srtt): held back */

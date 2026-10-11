@@ -9,12 +9,21 @@ xqc_bool_t xqc_scheduler_check_path_can_send(xqc_path_ctx_t *path, xqc_packet_ou
 
 /*
  * Standby (draft-ietf-quic-multipath-21 PATH_STATUS_BACKUP) filter for the
- * schedulers that pick among all paths. It applies the rule of
- * xqc_scheduler_backup.c: a standby path does not get new data while an
- * ACTIVE, non-FROZEN available path of the same or a better performance
- * class (xqc_path_get_perf_class) exists, whether or not that path has
- * cwnd room right now. Standby paths carry data again once no such
- * available path remains, and reinjected packets may always use them.
+ * schedulers that pick among all paths: a standby path does not get new
+ * data while a working available path exists, whether or not that path has
+ * cwnd room right now. Standby paths carry data again once none remains,
+ * and reinjected packets may always use them.
+ *
+ * "Working" uses the performance classes of xqc_path_get_perf_class over
+ * ACTIVE, non-FROZEN paths. An available path in the HIGH or MID class
+ * holds every standby path back. One in the LOW class only (failing: PTOs,
+ * loss above loss_percent_thr_high or srtt above rtt_us_thr_high) holds
+ * back LOW standby paths and lets a better one carry data, as
+ * xqc_scheduler_backup.c does. Unlike that scheduler, a MID available path
+ * does not free a HIGH standby path: MID is reached by a slow link
+ * (bandwidth estimate under bw_Bps_thr) or a loaded one (srtt above three
+ * times the smallest srtt, which an idle standby path often holds), and
+ * either would put a backup link into permanent use.
  *
  * Build it once per get_path call with xqc_scheduler_standby_filter_init,
  * then ask xqc_scheduler_standby_skip for each candidate. When the

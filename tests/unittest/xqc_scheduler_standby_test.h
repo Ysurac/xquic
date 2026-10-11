@@ -4,11 +4,11 @@
  * Standby-path tests for the path-picking schedulers.
  *
  * draft-ietf-quic-multipath-21 PATH_STATUS_BACKUP: a standby path is not
- * used while an available path exists. The schedulers apply the rule of
- * xqc_scheduler_backup.c (xqc_scheduler_standby_skip): no new data on a
- * standby path while an ACTIVE available path of the same or a better
- * performance class exists, data again once none remains, and reinjection
- * may use a standby path.
+ * used while an available path exists. The schedulers apply
+ * xqc_scheduler_standby_skip: no new data on a standby path while a working
+ * (HIGH or MID class) available path exists, nor while a failing (LOW)
+ * one exists and the standby path is LOW too; data again once none
+ * remains; reinjection may use a standby path.
  */
 #ifndef XQC_SCHEDULER_STANDBY_TEST_H_INCLUDED
 #define XQC_SCHEDULER_STANDBY_TEST_H_INCLUDED
@@ -29,9 +29,9 @@ void xqc_test_standby_wlb_blocked_primary_does_not_spill(void);
 /* WLB: a reinjected copy may use the standby path. */
 void xqc_test_standby_wlb_reinject_may_use_standby(void);
 
-/* WLB and MinRTT: an available path degraded to the MID or LOW class does
- * not hold back a standby path of a better class, but does hold back one of
- * the same class. */
+/* WLB and MinRTT: an available path in the MID class (slow or loaded) holds
+ * back a HIGH standby path; one in the LOW class (failing) lets a better
+ * standby path carry data but holds back a LOW one. */
 void xqc_test_standby_perf_class_rule(void);
 
 /* MinRTT, WRR, WRTT, DSCP and RAP: the standby path is skipped even when it

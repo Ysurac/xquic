@@ -35,9 +35,8 @@
  * touch the WRR state, so control traffic (ACKs, handshake) always takes
  * the lowest-latency path instead of being spread thin by the rotation.
  *
- * Standby paths (PATH_STATUS_BACKUP) are not usable while an available path
- * of the same or a better performance class exists, whatever their weight
- * (xqc_scheduler_standby_skip, the rule of the backup scheduler).
+ * Standby paths (PATH_STATUS_BACKUP) are not usable while a working
+ * available path exists, whatever their weight (xqc_scheduler_standby_skip).
  *
  * Weights are read live from path->path_weight on every call (same field
  * WRTT uses, set via xqc_conn_set_path_weight()). weight=0 is treated as

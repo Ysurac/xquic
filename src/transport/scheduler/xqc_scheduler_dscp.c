@@ -19,9 +19,9 @@
  *      entirely.
  *
  * Standby paths (PATH_STATUS_BACKUP) are not candidates, even for a class
- * their mask names, while an available path of the same or a better
- * performance class exists (xqc_scheduler_standby_skip, the rule of the
- * backup scheduler); tagged traffic then takes the MinRTT fallback.
+ * their mask names, while a working available path exists
+ * (xqc_scheduler_standby_skip); tagged traffic then takes the MinRTT
+ * fallback.
  *
  * No scheduler state is needed: like WRTT, this is a single pass (two at
  * most, for the tagged-with-fallback case) over the path list on every

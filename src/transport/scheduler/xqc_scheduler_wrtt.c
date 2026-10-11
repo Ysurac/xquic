@@ -9,9 +9,8 @@
  *   3. When the best path is cwnd-blocked, the next-best path takes the
  *      packet — providing bandwidth aggregation without round-robin.
  *
- * Standby paths (PATH_STATUS_BACKUP) are not usable while an available path
- * of the same or a better performance class exists, whatever their weight
- * (xqc_scheduler_standby_skip, the rule of the backup scheduler).
+ * Standby paths (PATH_STATUS_BACKUP) are not usable while a working
+ * available path exists, whatever their weight (xqc_scheduler_standby_skip).
  *
  * No scheduler state is needed: the algorithm is a single pass over the
  * path list on every call, identical in structure to MinRTT but with

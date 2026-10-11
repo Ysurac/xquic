@@ -31,11 +31,10 @@ static xqc_bool_t
 xqc_scheduler_standby_decide(const xqc_sched_standby_filter_t *filter,
     xqc_path_ctx_t *path)
 {
-    /* Available classes are even and the standby class of the same
-     * performance level is the next odd value, so "an available path of the
-     * same or a better level exists" is best_available_class < class. With
-     * an AVAILABLE_HIGH path every standby class loses: skip classifying. */
-    if (filter->best_available_class == XQC_PATH_CLASS_AVAILABLE_HIGH) {
+    /* A HIGH or MID available path holds every standby path back, without
+     * classifying it. Behind a LOW one only a LOW standby path is held
+     * back: STANDBY_LOW is the one standby class above AVAILABLE_LOW. */
+    if (filter->best_available_class <= XQC_PATH_CLASS_AVAILABLE_MID) {
         return XQC_TRUE;
     }
     return xqc_path_get_perf_class(path) > filter->best_available_class;
@@ -87,8 +86,8 @@ xqc_scheduler_standby_filter_init(xqc_sched_standby_filter_t *filter,
         path_class = xqc_path_get_perf_class(path);
         if (path_class < filter->best_available_class) {
             filter->best_available_class = path_class;
-            if (path_class == XQC_PATH_CLASS_AVAILABLE_HIGH) {
-                break;
+            if (path_class <= XQC_PATH_CLASS_AVAILABLE_MID) {
+                break;  /* holds every standby path back already */
             }
         }
     }
