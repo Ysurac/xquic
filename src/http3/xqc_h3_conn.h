@@ -103,6 +103,11 @@ typedef struct xqc_h3_conn_s {
 
     /* blocked buffer monitoring */
     size_t                       total_blocked_buf_size;           /* current total blocked buffer size */
+
+    /* timer that brings the connection back into the engine when a request
+       paused by recv_body_buf_high_water is resumed; registered on first use */
+    xqc_gp_timer_id_t            body_resume_timer;
+    xqc_bool_t                   body_resume_timer_registered;
 } xqc_h3_conn_t;
 
 

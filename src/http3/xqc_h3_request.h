@@ -37,6 +37,8 @@ typedef struct xqc_h3_request_s {
     /* received body buf list and statistic information */
     xqc_list_head_t                 body_buf;
     uint64_t                        body_buf_count;
+    /* body bytes in body_buf not yet read by the application */
+    size_t                          body_buf_size;
     size_t                          body_recvd;
     size_t                          body_recvd_final_size;
 

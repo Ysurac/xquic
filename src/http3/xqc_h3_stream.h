@@ -81,6 +81,13 @@ typedef enum {
     XQC_HTTP3_STREAM_FLAG_ACTIVELY_CLOSED = 0x1000,
     /* FIN was sent and no data will be sent any more */
     XQC_HTTP3_STREAM_FLAG_FIN_SENT = 0x2000,
+    /* XQC_HTTP3_STREAM_FLAG_BODY_PAUSED indicates that the request holds
+       recv_body_buf_high_water unread body bytes, so the transport stream is
+       left unread until the application drains the body buffer. */
+    XQC_HTTP3_STREAM_FLAG_BODY_PAUSED = 0x4000,
+    /* XQC_HTTP3_STREAM_IN_BODY_NOTIFY is set while the read notify of this
+       stream is calling the application's body read callback. */
+    XQC_HTTP3_STREAM_IN_BODY_NOTIFY = 0x8000,
 } xqc_h3_stream_flag;
 
 typedef struct xqc_h3_stream_pctx_s {
@@ -213,6 +220,10 @@ xqc_int_t xqc_h3_stream_send_setting(xqc_h3_stream_t *h3s,
 xqc_int_t xqc_h3_stream_send_goaway(xqc_h3_stream_t *h3s, uint64_t push_id, uint8_t fin);
 
 xqc_int_t xqc_h3_stream_process_blocked_stream(xqc_h3_stream_t *h3s);
+
+/* the application read body bytes: resume reading a paused request stream
+   once its body buffer is below recv_body_buf_high_water */
+void xqc_h3_stream_on_body_read(xqc_h3_stream_t *h3s);
 
 xqc_var_buf_t *xqc_h3_stream_get_send_buf(xqc_h3_stream_t *h3s);
 

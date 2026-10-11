@@ -793,7 +793,14 @@ xqc_h3_request_recv_body(xqc_h3_request_t *h3_request, unsigned char *recv_buf,
     /* all data in body buf was read, reset XQC_REQ_NOTIFY_READ_BODY */
     if (xqc_list_empty(&h3_request->body_buf)) {
         h3_request->read_flag &= ~XQC_REQ_NOTIFY_READ_BODY;
+        h3_request->body_buf_size = 0;
+
+    } else {
+        h3_request->body_buf_size -= xqc_min((size_t)n_recv, h3_request->body_buf_size);
     }
+
+    /* resume reading the request stream if it was paused at the high-water mark */
+    xqc_h3_stream_on_body_read(h3_request->h3_stream);
 
     h3_request->body_recvd += n_recv;
     if (h3_request->body_buf_count == 0) {

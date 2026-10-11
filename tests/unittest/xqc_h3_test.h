@@ -63,4 +63,11 @@ void xqc_test_h3_blocked_stream_limit_uses_local();
 /* ALIBABA-2026-42073004: SETTINGS frame size limit */
 void xqc_test_h3_settings_frame_size_limit();
 
+/* recv_body_buf_high_water: request body backpressure */
+void xqc_test_h3_recv_body_high_water();
+void xqc_test_h3_recv_body_high_water_drain_in_cb();
+void xqc_test_h3_recv_body_high_water_unlimited();
+void xqc_test_h3_recv_body_high_water_reset();
+void xqc_test_h3_recv_body_high_water_resume_in_engine();
+
 #endif // XQUIC_XQC_H3_TEST_H

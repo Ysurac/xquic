@@ -772,6 +772,9 @@ SETTINGS_QPACK_MAX_TABLE_CAPACITY parameter of http3 settings frame.
 #### qpack_blocked_streams
 SETTINGS_QPACK_BLOCKED_STREAMS parameter of http3 settings frame.
 
+#### recv_body_buf_high_water
+Local limit, not sent to the peer. Once a request holds this many body bytes not yet read with xqc_h3_request_recv_body, its QUIC stream is no longer read, so stream flow control pushes back on the peer; reading resumes when the application drains the body below the mark. 0 (default) means unlimited.
+
 
 ### xqc_h3_conn_callbacks_t
 Aggregation of http3 connection events.

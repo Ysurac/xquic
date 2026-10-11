@@ -12,6 +12,8 @@
 #include "src/http3/xqc_h3_header.h"
 #include "src/http3/qpack/xqc_qpack.h"
 #include "src/transport/xqc_stream.h"
+#include "src/transport/xqc_frame.h"
+#include "src/transport/xqc_engine.h"
 #include "src/http3/qpack/stable/xqc_stable.h"
 
 #include "xqc_common_test.h"
@@ -2187,4 +2189,330 @@ xqc_test_h3_settings_frame_size_limit()
     ret = xqc_h3_frm_parse(normal_settings, sizeof(normal_settings), &pctx);
     /* normal-sized SETTINGS frame should parse successfully */
     CU_ASSERT(ret >= 0);
+}
+
+
+/*
+ * recv_body_buf_high_water: a request whose application stops calling
+ * xqc_h3_request_recv_body() must stop pulling bytes out of the transport
+ * stream once its unread body reaches the mark, so stream flow-control credit
+ * is not returned, and must pick up where it left off once the application
+ * drains the body: same bytes, same order, trailers and FIN after the body.
+ */
+
+int xqc_h3_stream_read_notify(xqc_stream_t *stream, void *user_data);
+
+#define XQC_HWM_TEST_MARK       8192
+#define XQC_HWM_TEST_FRAME      1000
+#define XQC_HWM_TEST_FRAMES     100
+#define XQC_HWM_TEST_BODY       (XQC_HWM_TEST_FRAME * XQC_HWM_TEST_FRAMES)
+
+typedef struct {
+    xqc_bool_t      drain_in_cb;     /* read the body from the notify */
+    unsigned char   got[XQC_HWM_TEST_BODY + 1];
+    size_t          got_len;
+    xqc_bool_t      got_fin;
+    xqc_bool_t      fin_before_end;  /* FIN reported before all bytes */
+    int             body_notifies;
+    xqc_bool_t      trailer_seen;
+} xqc_hwm_app_t;
+
+static xqc_hwm_app_t xqc_hwm_app;
+
+static unsigned char
+xqc_hwm_pattern(size_t i)
+{
+    return (unsigned char)((i * 7 + 3) & 0xff);
+}
+
+/* drain the body buffer until it would block; returns bytes read */
+static size_t
+xqc_hwm_drain(xqc_h3_request_t *h3r, size_t max)
+{
+    size_t total = 0;
+    unsigned char buf[1500];
+    uint8_t fin = 0;
+
+    while (total < max) {
+        size_t want = xqc_min(sizeof(buf), max - total);
+        ssize_t n = xqc_h3_request_recv_body(h3r, buf, want, &fin);
+        if (n < 0) {
+            CU_ASSERT(n == -XQC_EAGAIN);
+            break;
+        }
+        CU_ASSERT_FATAL(xqc_hwm_app.got_len + n <= XQC_HWM_TEST_BODY);
+        memcpy(xqc_hwm_app.got + xqc_hwm_app.got_len, buf, n);
+        xqc_hwm_app.got_len += n;
+        total += n;
+        if (fin) {
+            if (xqc_hwm_app.got_len != XQC_HWM_TEST_BODY) {
+                xqc_hwm_app.fin_before_end = XQC_TRUE;
+            }
+            xqc_hwm_app.got_fin = XQC_TRUE;
+            break;
+        }
+        if (n == 0) {
+            break;
+        }
+    }
+    return total;
+}
+
+static int
+xqc_hwm_read_notify(xqc_h3_request_t *h3r, xqc_request_notify_flag_t flag, void *user_data)
+{
+    (void)user_data;
+    if (flag & XQC_REQ_NOTIFY_READ_TRAILER) {
+        xqc_hwm_app.trailer_seen = XQC_TRUE;
+    }
+    if (flag & XQC_REQ_NOTIFY_READ_BODY) {
+        xqc_hwm_app.body_notifies++;
+        if (xqc_hwm_app.drain_in_cb) {
+            xqc_hwm_drain(h3r, SIZE_MAX);
+        }
+    }
+    return 0;
+}
+
+/* HEADERS, the body as DATA frames, a trailer HEADERS section and the FIN,
+ * queued in the transport stream as if they had all arrived */
+static size_t
+xqc_hwm_feed_request(xqc_stream_t *stream)
+{
+    size_t total = 2 * sizeof(xqc_h3_msgerr_valid_headers)
+                   + XQC_HWM_TEST_FRAMES * (3 + XQC_HWM_TEST_FRAME);
+    unsigned char *wire = xqc_malloc(total);
+    size_t off = 0, body = 0;
+
+    memcpy(wire + off, xqc_h3_msgerr_valid_headers, sizeof(xqc_h3_msgerr_valid_headers));
+    off += sizeof(xqc_h3_msgerr_valid_headers);
+    for (int f = 0; f < XQC_HWM_TEST_FRAMES; f++) {
+        wire[off++] = 0x00;                                 /* DATA */
+        wire[off++] = 0x40 | (XQC_HWM_TEST_FRAME >> 8);     /* 2-byte varint */
+        wire[off++] = XQC_HWM_TEST_FRAME & 0xff;
+        for (int i = 0; i < XQC_HWM_TEST_FRAME; i++) {
+            wire[off++] = xqc_hwm_pattern(body++);
+        }
+    }
+    memcpy(wire + off, xqc_h3_msgerr_valid_headers, sizeof(xqc_h3_msgerr_valid_headers));
+    off += sizeof(xqc_h3_msgerr_valid_headers);
+    CU_ASSERT(off == total);
+
+    xqc_stream_frame_t *frame = xqc_calloc(1, sizeof(xqc_stream_frame_t));
+    frame->data = wire;
+    frame->data_length = total;
+    frame->data_offset = 0;
+    frame->fin = 1;
+    CU_ASSERT(xqc_insert_stream_frame(stream->stream_conn, stream, frame) == XQC_OK);
+    stream->stream_data_in.stream_length = total;
+    stream->stream_data_in.stream_determined = XQC_TRUE;
+    stream->stream_state_recv = XQC_RECV_STREAM_ST_DATA_RECVD;
+    return total;
+}
+
+static xqc_h3_stream_t *
+xqc_hwm_setup(xqc_connection_t **conn, xqc_h3_conn_t **h3c, uint64_t mark,
+              xqc_bool_t drain_in_cb)
+{
+    memset(&xqc_hwm_app, 0, sizeof(xqc_hwm_app));
+    xqc_hwm_app.drain_in_cb = drain_in_cb;
+
+    xqc_h3_stream_t *h3s = xqc_h3_msgerr_setup(conn, h3c);
+    if (h3s == NULL) {
+        return NULL;
+    }
+    (*h3c)->local_h3_conn_settings.recv_body_buf_high_water = mark;
+    (*h3c)->h3_request_callbacks.h3_request_read_notify = xqc_hwm_read_notify;
+    return h3s;
+}
+
+static xqc_bool_t
+xqc_hwm_body_intact(void)
+{
+    if (xqc_hwm_app.got_len != XQC_HWM_TEST_BODY) {
+        return XQC_FALSE;
+    }
+    for (size_t i = 0; i < XQC_HWM_TEST_BODY; i++) {
+        if (xqc_hwm_app.got[i] != xqc_hwm_pattern(i)) {
+            return XQC_FALSE;
+        }
+    }
+    return XQC_TRUE;
+}
+
+/* the application stops reading: the stream stops being read, then drains */
+void
+xqc_test_h3_recv_body_high_water()
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = xqc_hwm_setup(&conn, &h3c, XQC_HWM_TEST_MARK, XQC_FALSE);
+    CU_ASSERT_FATAL(h3s != NULL);
+    xqc_stream_t *stream = h3s->stream;
+    xqc_h3_request_t *h3r = h3s->h3r;
+
+    size_t total = xqc_hwm_feed_request(stream);
+
+    /* first arrival: reads up to the mark, then leaves the rest queued */
+    CU_ASSERT(xqc_h3_stream_read_notify(stream, h3s) == XQC_OK);
+    CU_ASSERT(h3s->flags & XQC_HTTP3_STREAM_FLAG_BODY_PAUSED);
+    CU_ASSERT(h3r->body_buf_size >= XQC_HWM_TEST_MARK);
+    CU_ASSERT(h3r->body_buf_size < XQC_HWM_TEST_MARK + XQC_DATA_BUF_SIZE_4K);
+    CU_ASSERT(xqc_hwm_app.body_notifies == 1);
+    uint64_t read_off = stream->stream_data_in.next_read_offset;
+    CU_ASSERT(read_off < total);
+    CU_ASSERT(!(stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ));
+
+    /* more packets for the stream while paused: nothing more is read */
+    for (int i = 0; i < 3; i++) {
+        xqc_stream_ready_to_read(stream);
+        CU_ASSERT(xqc_h3_stream_read_notify(stream, h3s) == XQC_OK);
+        CU_ASSERT(stream->stream_data_in.next_read_offset == read_off);
+        CU_ASSERT(h3r->body_buf_size < XQC_HWM_TEST_MARK + XQC_DATA_BUF_SIZE_4K);
+        CU_ASSERT(!(stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ));
+    }
+
+    /* a read that stays at or above the mark does not resume */
+    size_t small = h3r->body_buf_size - XQC_HWM_TEST_MARK;
+    if (small > 0) {
+        CU_ASSERT(xqc_hwm_drain(h3r, small) == small);
+        CU_ASSERT(h3s->flags & XQC_HTTP3_STREAM_FLAG_BODY_PAUSED);
+        CU_ASSERT(!(stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ));
+    }
+
+    /* outside an engine run, draining below the mark queues the stream; each
+     * engine pass (a read notify) moves at most one more mark of data */
+    int rounds = 0;
+    while (!xqc_hwm_app.got_fin && rounds++ < 1000) {
+        CU_ASSERT(h3r->body_buf_size < XQC_HWM_TEST_MARK + XQC_DATA_BUF_SIZE_4K);
+        xqc_hwm_drain(h3r, SIZE_MAX);
+        if (xqc_hwm_app.got_fin) {
+            break;
+        }
+        CU_ASSERT(!(h3s->flags & XQC_HTTP3_STREAM_FLAG_BODY_PAUSED));
+        CU_ASSERT(stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+        CU_ASSERT(xqc_h3_stream_read_notify(stream, h3s) == XQC_OK);
+    }
+    CU_ASSERT(rounds > XQC_HWM_TEST_BODY / (XQC_HWM_TEST_MARK + XQC_DATA_BUF_SIZE_4K));
+    CU_ASSERT(xqc_hwm_app.got_fin);
+    CU_ASSERT(!xqc_hwm_app.fin_before_end);
+    CU_ASSERT(xqc_hwm_app.trailer_seen);
+    CU_ASSERT(xqc_hwm_body_intact());
+    CU_ASSERT(stream->stream_data_in.next_read_offset == total);
+    CU_ASSERT(stream->stream_state_recv == XQC_RECV_STREAM_ST_DATA_READ);
+
+    xqc_h3_msgerr_teardown(h3s, h3c, conn);
+}
+
+/* an application that reads from the notify sees no difference, and the
+ * whole request is consumed by one read notify (no extra engine pass) */
+void
+xqc_test_h3_recv_body_high_water_drain_in_cb()
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = xqc_hwm_setup(&conn, &h3c, XQC_HWM_TEST_MARK, XQC_TRUE);
+    CU_ASSERT_FATAL(h3s != NULL);
+    xqc_stream_t *stream = h3s->stream;
+
+    size_t total = xqc_hwm_feed_request(stream);
+
+    CU_ASSERT(xqc_h3_stream_read_notify(stream, h3s) == XQC_OK);
+    CU_ASSERT(xqc_hwm_app.body_notifies > 1);
+    CU_ASSERT(xqc_hwm_app.got_fin);
+    CU_ASSERT(!xqc_hwm_app.fin_before_end);
+    CU_ASSERT(xqc_hwm_app.trailer_seen);
+    CU_ASSERT(xqc_hwm_body_intact());
+    CU_ASSERT(stream->stream_data_in.next_read_offset == total);
+    CU_ASSERT(!(h3s->flags & XQC_HTTP3_STREAM_FLAG_BODY_PAUSED));
+
+    xqc_h3_msgerr_teardown(h3s, h3c, conn);
+}
+
+/* default 0 keeps the old behaviour: everything is read into the buffer */
+void
+xqc_test_h3_recv_body_high_water_unlimited()
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = xqc_hwm_setup(&conn, &h3c, 0, XQC_FALSE);
+    CU_ASSERT_FATAL(h3s != NULL);
+    xqc_stream_t *stream = h3s->stream;
+
+    size_t total = xqc_hwm_feed_request(stream);
+
+    CU_ASSERT(xqc_h3_stream_read_notify(stream, h3s) == XQC_OK);
+    CU_ASSERT(!(h3s->flags & XQC_HTTP3_STREAM_FLAG_BODY_PAUSED));
+    CU_ASSERT(stream->stream_data_in.next_read_offset == total);
+    CU_ASSERT(h3s->h3r->body_buf_size == XQC_HWM_TEST_BODY);
+    CU_ASSERT(xqc_hwm_app.trailer_seen);
+
+    xqc_hwm_drain(h3s->h3r, SIZE_MAX);
+    CU_ASSERT(h3s->h3r->body_buf_size == 0);
+    CU_ASSERT(xqc_hwm_app.got_fin);
+    CU_ASSERT(xqc_hwm_body_intact());
+
+    xqc_h3_msgerr_teardown(h3s, h3c, conn);
+}
+
+/* a reset that arrives while paused is still processed */
+void
+xqc_test_h3_recv_body_high_water_reset()
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = xqc_hwm_setup(&conn, &h3c, XQC_HWM_TEST_MARK, XQC_FALSE);
+    CU_ASSERT_FATAL(h3s != NULL);
+    xqc_stream_t *stream = h3s->stream;
+
+    xqc_hwm_feed_request(stream);
+    CU_ASSERT(xqc_h3_stream_read_notify(stream, h3s) == XQC_OK);
+    CU_ASSERT_FATAL(h3s->flags & XQC_HTTP3_STREAM_FLAG_BODY_PAUSED);
+
+    /* what xqc_process_reset_stream_frame() leaves behind */
+    stream->stream_state_recv = XQC_RECV_STREAM_ST_RESET_RECVD;
+    xqc_destroy_frame_list(&stream->stream_data_in.frames_tailq);
+    stream->stream_data_in.buffered_frame_count = 0;
+    stream->stream_data_in.buffered_data_bytes = 0;
+    xqc_stream_ready_to_read(stream);
+
+    CU_ASSERT(xqc_h3_stream_read_notify(stream, h3s) == XQC_OK);
+    CU_ASSERT(stream->stream_state_recv == XQC_RECV_STREAM_ST_RESET_READ);
+    CU_ASSERT(!(stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ));
+
+    xqc_h3_msgerr_teardown(h3s, h3c, conn);
+}
+
+/* drained from a callback of another stream inside an engine run: the
+ * connection must be brought back by a timer due now */
+void
+xqc_test_h3_recv_body_high_water_resume_in_engine()
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = xqc_hwm_setup(&conn, &h3c, XQC_HWM_TEST_MARK, XQC_FALSE);
+    CU_ASSERT_FATAL(h3s != NULL);
+    xqc_stream_t *stream = h3s->stream;
+
+    xqc_hwm_feed_request(stream);
+    CU_ASSERT(xqc_h3_stream_read_notify(stream, h3s) == XQC_OK);
+    CU_ASSERT_FATAL(h3s->flags & XQC_HTTP3_STREAM_FLAG_BODY_PAUSED);
+    CU_ASSERT(!h3c->body_resume_timer_registered);
+
+    conn->engine->eng_flag |= XQC_ENG_FLAG_RUNNING;
+    xqc_hwm_drain(h3s->h3r, SIZE_MAX);
+    conn->engine->eng_flag &= ~XQC_ENG_FLAG_RUNNING;
+
+    CU_ASSERT(!(h3s->flags & XQC_HTTP3_STREAM_FLAG_BODY_PAUSED));
+    CU_ASSERT(stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+    CU_ASSERT_FATAL(h3c->body_resume_timer_registered);
+
+    xqc_bool_t is_set = XQC_FALSE;
+    xqc_usec_t expire = 0;
+    CU_ASSERT(xqc_conn_gp_timer_get_info(conn, h3c->body_resume_timer, &is_set,
+                                         &expire) == XQC_OK);
+    CU_ASSERT(is_set);
+    CU_ASSERT(expire <= xqc_monotonic_timestamp());
+
+    xqc_h3_msgerr_teardown(h3s, h3c, conn);
 }
