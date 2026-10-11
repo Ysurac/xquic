@@ -71,21 +71,26 @@ xqc_h3_stream_close(xqc_h3_stream_t *h3s)
         return XQC_OK;
 
     } else {
-        if (h3s->flags & XQC_HTTP3_STREAM_FLAG_BODY_PAUSED) {
+        /*
+         * lifetime of stream and h3 stream synchronizes,
+         * will destroy h3 stream during stream close notify
+         */
+        xqc_int_t ret = xqc_stream_close(h3s->stream);
+
+        if ((h3s->flags & XQC_HTTP3_STREAM_FLAG_BODY_PAUSED) && h3s->stream != NULL) {
             /*
-             * the application gives up on the body: stop holding the data
+             * The application gives up on the body: stop holding the data
              * back, or a stream whose peer already sent everything would
-             * never be read to its end and could not reach a terminal state.
+             * never be read to its end and could not reach a terminal
+             * state. Released after the close and only queued, so the
+             * engine run inside xqc_stream_close() does not deliver body
+             * to the application from within its own close call.
              */
             h3s->flags &= ~XQC_HTTP3_STREAM_FLAG_BODY_PAUSED;
             xqc_h3_stream_resume_body_read(h3s);
         }
 
-        /*
-         * lifetime of stream and h3 stream synchronizes,
-         * will destroy h3 stream during stream close notify
-         */
-        return xqc_stream_close(h3s->stream);
+        return ret;
     }
 }
 
@@ -1902,7 +1907,11 @@ xqc_h3_stream_body_at_high_water(xqc_h3_stream_t *h3s)
 {
     uint64_t hwm;
 
-    if (h3s->type != XQC_H3_STREAM_TYPE_REQUEST || h3s->h3r == NULL) {
+    /* a request the application closed is read to its end, see
+     * xqc_h3_stream_close() */
+    if (h3s->type != XQC_H3_STREAM_TYPE_REQUEST || h3s->h3r == NULL
+        || (h3s->flags & XQC_HTTP3_STREAM_FLAG_ACTIVELY_CLOSED))
+    {
         return XQC_FALSE;
     }
 

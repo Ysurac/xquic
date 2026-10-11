@@ -2516,3 +2516,30 @@ xqc_test_h3_recv_body_high_water_resume_in_engine()
 
     xqc_h3_msgerr_teardown(h3s, h3c, conn);
 }
+
+/* closing a paused request releases it, so the transport stream can be read
+ * to its end and reach a terminal state */
+void
+xqc_test_h3_recv_body_high_water_close()
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = xqc_hwm_setup(&conn, &h3c, XQC_HWM_TEST_MARK, XQC_FALSE);
+    CU_ASSERT_FATAL(h3s != NULL);
+    xqc_stream_t *stream = h3s->stream;
+
+    size_t total = xqc_hwm_feed_request(stream);
+    CU_ASSERT(xqc_h3_stream_read_notify(stream, h3s) == XQC_OK);
+    CU_ASSERT_FATAL(h3s->flags & XQC_HTTP3_STREAM_FLAG_BODY_PAUSED);
+    CU_ASSERT(stream->stream_data_in.next_read_offset < total);
+
+    CU_ASSERT(xqc_h3_request_close(h3s->h3r) == XQC_OK);
+    CU_ASSERT(!(h3s->flags & XQC_HTTP3_STREAM_FLAG_BODY_PAUSED));
+    CU_ASSERT(stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+
+    CU_ASSERT(xqc_h3_stream_read_notify(stream, h3s) == XQC_OK);
+    CU_ASSERT(stream->stream_data_in.next_read_offset == total);
+    CU_ASSERT(stream->stream_state_recv == XQC_RECV_STREAM_ST_DATA_READ);
+
+    xqc_h3_msgerr_teardown(h3s, h3c, conn);
+}

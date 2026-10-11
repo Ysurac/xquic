@@ -69,5 +69,6 @@ void xqc_test_h3_recv_body_high_water_drain_in_cb();
 void xqc_test_h3_recv_body_high_water_unlimited();
 void xqc_test_h3_recv_body_high_water_reset();
 void xqc_test_h3_recv_body_high_water_resume_in_engine();
+void xqc_test_h3_recv_body_high_water_close();
 
 #endif // XQUIC_XQC_H3_TEST_H
