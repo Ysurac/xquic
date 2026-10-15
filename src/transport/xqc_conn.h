@@ -142,15 +142,17 @@ typedef enum {
     XQC_CONN_FLAG_HANDSHAKE_DONE_SENT_SHIFT = 40,
     XQC_CONN_FLAG_SERVER_ACCEPT_SHIFT = 41,
     XQC_CONN_FLAG_RETRY_SENT_SHIFT = 42,
+    XQC_CONN_FLAG_DGRAM_WAIT_FOR_UNSENT_SHIFT = 43,
     XQC_CONN_FLAG_SHIFT_NUM,
 } xqc_conn_flag_shift_t;
 
-/* xqc_conn_flag_t holds bit values up to bit 42 (RETRY_SENT). MSVC's C
- * compiler always uses int as the underlying type for plain enum, silently
- * truncating any value >= bit 31 — so bits 32..42 (CONN_CLOSING_NOTIFIED,
- * DGRAM_WAIT_FOR_1RTT, LOCAL_TP_UPDATED, PMTUD_PROBING, NO_DGRAM_NOTIFIED,
- * DGRAM_MSS_NOTIFY, MP_WAIT_MP_READY, MP_READY_NOTIFY, HANDSHAKE_DONE_SENT,
- * SERVER_ACCEPT, RETRY_SENT) silently fail to set on Windows builds, which
+/* xqc_conn_flag_t holds bit values up to bit 43 (DGRAM_WAIT_FOR_UNSENT).
+ * MSVC's C compiler always uses int as the underlying type for plain enum,
+ * silently truncating any value >= bit 31 — so bits 32..43
+ * (CONN_CLOSING_NOTIFIED, DGRAM_WAIT_FOR_1RTT, LOCAL_TP_UPDATED,
+ * PMTUD_PROBING, NO_DGRAM_NOTIFIED, DGRAM_MSS_NOTIFY, MP_WAIT_MP_READY,
+ * MP_READY_NOTIFY, HANDSHAKE_DONE_SENT, SERVER_ACCEPT, RETRY_SENT,
+ * DGRAM_WAIT_FOR_UNSENT) silently fail to set on Windows builds, which
  * notably breaks multipath's ready_to_create_path callback chain (and PMTUD,
  * HANDSHAKE_DONE_SENT, etc.). Use a uint64_t typedef + #define so the
  * underlying storage is guaranteed 64-bit on every compiler. */
@@ -199,6 +201,7 @@ typedef uint64_t xqc_conn_flag_t;
 #define XQC_CONN_FLAG_HANDSHAKE_DONE_SENT   ((xqc_conn_flag_t)1ULL << XQC_CONN_FLAG_HANDSHAKE_DONE_SENT_SHIFT)
 #define XQC_CONN_FLAG_SERVER_ACCEPT         ((xqc_conn_flag_t)1ULL << XQC_CONN_FLAG_SERVER_ACCEPT_SHIFT)
 #define XQC_CONN_FLAG_RETRY_SENT            ((xqc_conn_flag_t)1ULL << XQC_CONN_FLAG_RETRY_SENT_SHIFT)
+#define XQC_CONN_FLAG_DGRAM_WAIT_FOR_UNSENT ((xqc_conn_flag_t)1ULL << XQC_CONN_FLAG_DGRAM_WAIT_FOR_UNSENT_SHIFT)
 
 /* Compile-time guards: regression here would silently break Windows multipath. */
 _Static_assert(sizeof(xqc_conn_flag_t) == 8,
@@ -208,7 +211,9 @@ _Static_assert(XQC_CONN_FLAG_MP_WAIT_MP_READY == ((xqc_conn_flag_t)1ULL << 38),
 _Static_assert(XQC_CONN_FLAG_MP_READY_NOTIFY == ((xqc_conn_flag_t)1ULL << 39),
                "XQC_CONN_FLAG_MP_READY_NOTIFY must be bit 39");
 _Static_assert(XQC_CONN_FLAG_RETRY_SENT == ((xqc_conn_flag_t)1ULL << 42),
-               "XQC_CONN_FLAG_RETRY_SENT must be bit 42 (highest currently-defined flag)");
+               "XQC_CONN_FLAG_RETRY_SENT must be bit 42");
+_Static_assert(XQC_CONN_FLAG_DGRAM_WAIT_FOR_UNSENT == ((xqc_conn_flag_t)1ULL << 43),
+               "XQC_CONN_FLAG_DGRAM_WAIT_FOR_UNSENT must be bit 43 (highest currently-defined flag)");
 
 
 typedef struct {

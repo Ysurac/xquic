@@ -1805,6 +1805,28 @@ typedef struct xqc_conn_settings_s {
      * — libxquic currently carries no SOVERSION.
      */
     uint8_t                     defer_send_flush;
+
+    /**
+     * max_stream_unsent_packets for DATAGRAM writes. 0 (default) = no cap.
+     * At the cap, the xqc_datagram_send* calls return -XQC_EAGAIN, and
+     * datagram_write_notify fires once the unsent packets have dropped to
+     * half the cap. Without it, datagrams offered faster than the paths
+     * drain them wait up to sndq_packets_used_max packets, which on a slow
+     * path is a delay of minutes rather than a loss the sender sees.
+     *
+     * ABI: appended like defer_send_flush, with the same caveat: rebuild
+     * every consumer against this header.
+     */
+    uint32_t                    max_dgram_unsent_packets;
+    /**
+     * Lowers max_dgram_unsent_packets to what the active paths send in
+     * this many milliseconds at their estimated bandwidth, but not below
+     * 64 packets. 0 (default) = the packet cap alone. A fixed packet cap
+     * is either seconds of delay on a slow path or too short a queue to
+     * keep a fast one busy; this keeps the wait about the same on both.
+     * Needs max_dgram_unsent_packets.
+     */
+    uint32_t                    max_dgram_unsent_delay_ms;
 } xqc_conn_settings_t;
 
 

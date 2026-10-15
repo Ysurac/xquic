@@ -10,6 +10,8 @@
 #include "src/transport/xqc_send_ctl.h"
 #include "src/transport/xqc_utils.h"
 #include "src/transport/xqc_engine.h"
+#include "src/transport/xqc_multipath.h"
+#include "src/transport/xqc_packet_out.h"
 
 
 xqc_datagram_0rtt_buffer_t* 
@@ -172,6 +174,87 @@ xqc_datagram_get_mss_on_path(xqc_connection_t *conn, uint64_t path_id)
     return mss;
 }
 
+/* floor of the delay-based cap: room for a burst on a slow path */
+#define XQC_DGRAM_UNSENT_MIN_PACKETS 64
+
+/*
+ * The unsent-datagram cap now: max_dgram_unsent_packets, lowered by
+ * max_dgram_unsent_delay_ms to what the active paths drain in that time.
+ * 0 = no cap.
+ */
+static uint64_t
+xqc_datagram_unsent_cap(xqc_connection_t *conn)
+{
+    uint64_t cap = conn->conn_settings.max_dgram_unsent_packets;
+    uint64_t delay_ms = conn->conn_settings.max_dgram_unsent_delay_ms;
+    uint64_t bw = 0, pkts, pkt_size;
+    xqc_list_head_t *pos, *next;
+    xqc_path_ctx_t *path;
+
+    if (cap == 0 || delay_ms == 0) {
+        return cap;
+    }
+
+    xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
+        path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
+        if (path->path_state == XQC_PATH_STATE_ACTIVE && path->path_send_ctl) {
+            bw += xqc_send_ctl_get_est_bw(path->path_send_ctl);
+        }
+    }
+
+    pkt_size = conn->pkt_out_size ? conn->pkt_out_size : XQC_PACKET_OUT_SIZE;
+    pkts = bw * delay_ms / 1000 / pkt_size;
+    pkts = xqc_max(pkts, XQC_DGRAM_UNSENT_MIN_PACKETS);
+    return xqc_min(pkts, cap);
+}
+
+/*
+ * True when the unsent-datagram cap is reached. The flag makes
+ * xqc_datagram_notify_unsent_room() wake the sender once the backlog has
+ * drained.
+ */
+static xqc_bool_t
+xqc_datagram_unsent_full(xqc_connection_t *conn)
+{
+    uint64_t cap = xqc_datagram_unsent_cap(conn);
+    uint64_t unsent;
+
+    if (cap == 0) {
+        return XQC_FALSE;
+    }
+
+    unsent = xqc_send_queue_get_unsent_packets_num(conn->conn_send_queue);
+    if (unsent < cap) {
+        return XQC_FALSE;
+    }
+
+    conn->conn_flag |= XQC_CONN_FLAG_DGRAM_WAIT_FOR_UNSENT;
+    xqc_log(conn->log, XQC_LOG_DEBUG, "|too many unsent packets|unsent:%ui|cap:%ui|",
+            unsent, cap);
+    return XQC_TRUE;
+}
+
+/*
+ * Wake a sender stopped by the unsent-datagram cap once half of it has
+ * drained, so it does not get one -XQC_EAGAIN per packet sent.
+ */
+void
+xqc_datagram_notify_unsent_room(xqc_connection_t *conn)
+{
+    if (!(conn->conn_flag & XQC_CONN_FLAG_DGRAM_WAIT_FOR_UNSENT)) {
+        return;
+    }
+
+    if (xqc_send_queue_get_unsent_packets_num(conn->conn_send_queue) * 2
+        > xqc_datagram_unsent_cap(conn))
+    {
+        return;
+    }
+
+    conn->conn_flag &= ~XQC_CONN_FLAG_DGRAM_WAIT_FOR_UNSENT;
+    xqc_datagram_notify_write(conn);
+}
+
 /*
  * @brief the API to send a datagram over the QUIC connection
  *
@@ -241,6 +324,10 @@ xqc_int_t xqc_datagram_send(xqc_connection_t *conn, void *data,
     if (!xqc_send_queue_can_write(conn->conn_send_queue)) {
         conn->conn_send_queue->sndq_full = XQC_TRUE;
         xqc_log(conn->log, XQC_LOG_DEBUG, "|too many packets used|ctl_packets_used:%ud|", conn->conn_send_queue->sndq_packets_used);
+        return -XQC_EAGAIN;
+    }
+
+    if (xqc_datagram_unsent_full(conn)) {
         return -XQC_EAGAIN;
     }
 
@@ -369,6 +456,10 @@ xqc_datagram_send_on_path(xqc_connection_t *conn, void *data,
         xqc_log(conn->log, XQC_LOG_DEBUG,
                 "|too many packets used|ctl_packets_used:%ud|",
                 conn->conn_send_queue->sndq_packets_used);
+        return -XQC_EAGAIN;
+    }
+
+    if (xqc_datagram_unsent_full(conn)) {
         return -XQC_EAGAIN;
     }
 
@@ -520,6 +611,11 @@ xqc_datagram_send_multiple_internal(xqc_connection_t *conn,
             conn->conn_send_queue->sndq_full = XQC_TRUE;
             xqc_log(conn->log, XQC_LOG_DEBUG, "|too many packets used|ctl_packets_used:%ud|", conn->conn_send_queue->sndq_packets_used);
             ret =  -XQC_EAGAIN;
+            break;
+        }
+
+        if (xqc_datagram_unsent_full(conn)) {
+            ret = -XQC_EAGAIN;
             break;
         }
 

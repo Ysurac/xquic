@@ -187,6 +187,10 @@ xqc_server_set_conn_settings(xqc_engine_t *engine, const xqc_conn_settings_t *se
     engine->default_conn_settings.sndq_packets_used_max = settings->sndq_packets_used_max;
     engine->default_conn_settings.max_stream_unsent_packets =
         settings->max_stream_unsent_packets;
+    engine->default_conn_settings.max_dgram_unsent_packets =
+        settings->max_dgram_unsent_packets;
+    engine->default_conn_settings.max_dgram_unsent_delay_ms =
+        settings->max_dgram_unsent_delay_ms;
     engine->default_conn_settings.max_stream_frame_buffered_cnt =
         settings->max_stream_frame_buffered_cnt;
     engine->default_conn_settings.linger = settings->linger;
@@ -574,6 +578,7 @@ static const char *const xqc_conn_flag_to_str[XQC_CONN_FLAG_SHIFT_NUM] = {
     [XQC_CONN_FLAG_HANDSHAKE_DONE_SENT_SHIFT] = "HANDSHAKE_DONE_SENT",
     [XQC_CONN_FLAG_SERVER_ACCEPT_SHIFT] = "SERVER_ACCEPT",
     [XQC_CONN_FLAG_RETRY_SENT_SHIFT] = "RETRY_PACKET_SENT",
+    [XQC_CONN_FLAG_DGRAM_WAIT_FOR_UNSENT_SHIFT] = "DGRAM_WAIT_FOR_UNSENT",
 };
 
 

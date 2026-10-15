@@ -8,5 +8,7 @@
 void xqc_test_receive_invalid_dgram();
 void xqc_test_datagram_send_on_path();
 void xqc_test_datagram_frame_path_pinning();
+void xqc_test_datagram_unsent_cap();
+void xqc_test_datagram_unsent_delay_cap();
 
 #endif /* _XQC_DATAGRAM_TEST_H_INCLUDED_ */

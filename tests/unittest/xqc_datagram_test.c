@@ -12,6 +12,7 @@
 #include "src/transport/xqc_packet_in.h"
 #include "src/transport/xqc_multipath.h"
 #include "src/transport/xqc_send_queue.h"
+#include "src/transport/xqc_datagram.h"
 #include "xqc_common_test.h"
 
 void
@@ -142,5 +143,134 @@ xqc_test_datagram_frame_path_pinning()
         CU_ASSERT_EQUAL(last_po->po_path_id, target_path_id);
     }
 
+    xqc_engine_destroy(conn->engine);
+}
+
+
+static int xqc_test_dgram_write_notified;
+
+static void
+xqc_test_dgram_write_notify(xqc_connection_t *conn, void *user_data)
+{
+    xqc_test_dgram_write_notified++;
+}
+
+/*
+ * max_dgram_unsent_packets: a datagram write is refused once that many
+ * packets wait unsent, and the writer is woken only after half of them
+ * have gone. The flush is deferred (TICKING + defer_send_flush) so the
+ * send does not run the engine, which would drain the queue.
+ */
+void
+xqc_test_datagram_unsent_cap()
+{
+    const uint32_t cap = 16;
+    static unsigned char data[1000];
+    uint64_t dgram_id = 0;
+    xqc_int_t ret = XQC_OK;
+    int i;
+
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+
+    conn->conn_flag |= XQC_CONN_FLAG_CAN_SEND_1RTT | XQC_CONN_FLAG_TICKING;
+    conn->conn_settings.defer_send_flush = 1;
+    conn->conn_settings.max_dgram_unsent_packets = cap;
+    conn->remote_settings.max_datagram_frame_size = 1200;
+    conn->dgram_mss = 1200;
+
+    for (i = 0; i < 4 * (int)cap; i++) {
+        ret = xqc_datagram_send(conn, data, sizeof(data), &dgram_id, XQC_DATA_QOS_HIGH);
+        if (ret != XQC_OK) {
+            break;
+        }
+    }
+
+    uint64_t unsent = xqc_send_queue_get_unsent_packets_num(conn->conn_send_queue);
+    CU_ASSERT_EQUAL(ret, -XQC_EAGAIN);
+    CU_ASSERT(unsent >= cap);
+    CU_ASSERT(unsent <= cap + 1);
+    CU_ASSERT((conn->conn_flag & XQC_CONN_FLAG_DGRAM_WAIT_FOR_UNSENT) != 0);
+
+    /* the other two entry points stop at the same cap */
+    struct iovec iov = {.iov_base = data, .iov_len = sizeof(data)};
+    size_t sent_cnt = 1, sent_bytes = 1;
+    ret = xqc_datagram_send_multiple(conn, &iov, NULL, 1, &sent_cnt, &sent_bytes,
+                                     XQC_DATA_QOS_HIGH);
+    CU_ASSERT_EQUAL(ret, -XQC_EAGAIN);
+    CU_ASSERT_EQUAL(sent_cnt, 0);
+    ret = xqc_datagram_send_on_path(conn, data, sizeof(data), &dgram_id,
+                                    XQC_DATA_QOS_HIGH, 0);
+    CU_ASSERT_EQUAL(ret, -XQC_EAGAIN);
+    CU_ASSERT_EQUAL(xqc_send_queue_get_unsent_packets_num(conn->conn_send_queue), unsent);
+
+    /* no wake-up while more than half the cap is still unsent */
+    conn->app_proto_cbs.dgram_cbs.datagram_write_notify = xqc_test_dgram_write_notify;
+    conn->conn_flag |= XQC_CONN_FLAG_UPPER_CONN_EXIST;
+    xqc_test_dgram_write_notified = 0;
+    xqc_datagram_notify_unsent_room(conn);
+    CU_ASSERT_EQUAL(xqc_test_dgram_write_notified, 0);
+    CU_ASSERT((conn->conn_flag & XQC_CONN_FLAG_DGRAM_WAIT_FOR_UNSENT) != 0);
+
+    /* a cap of twice the backlog stands for half of it being sent */
+    conn->conn_settings.max_dgram_unsent_packets = (uint32_t)(2 * unsent);
+    xqc_datagram_notify_unsent_room(conn);
+    CU_ASSERT_EQUAL(xqc_test_dgram_write_notified, 1);
+    CU_ASSERT((conn->conn_flag & XQC_CONN_FLAG_DGRAM_WAIT_FOR_UNSENT) == 0);
+
+    /* once only */
+    xqc_datagram_notify_unsent_room(conn);
+    CU_ASSERT_EQUAL(xqc_test_dgram_write_notified, 1);
+
+    /* no cap: the same backlog is accepted */
+    conn->conn_settings.max_dgram_unsent_packets = 0;
+    ret = xqc_datagram_send(conn, data, sizeof(data), &dgram_id, XQC_DATA_QOS_HIGH);
+    CU_ASSERT_EQUAL(ret, XQC_OK);
+
+    conn->conn_flag &= ~(XQC_CONN_FLAG_UPPER_CONN_EXIST | XQC_CONN_FLAG_TICKING);
+    xqc_engine_destroy(conn->engine);
+}
+
+/*
+ * max_dgram_unsent_delay_ms: the cap follows what the paths drain in that
+ * time. A connection with no bandwidth sample yet gets the 64-packet floor,
+ * well under a 1024-packet max_dgram_unsent_packets.
+ */
+void
+xqc_test_datagram_unsent_delay_cap()
+{
+    static unsigned char data[1000];
+    uint64_t dgram_id = 0;
+    xqc_int_t ret = XQC_OK;
+    int i;
+
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+
+    conn->conn_flag |= XQC_CONN_FLAG_CAN_SEND_1RTT | XQC_CONN_FLAG_TICKING;
+    conn->conn_settings.defer_send_flush = 1;
+    conn->conn_settings.max_dgram_unsent_packets = 1024;
+    conn->conn_settings.max_dgram_unsent_delay_ms = 50;
+    conn->remote_settings.max_datagram_frame_size = 1200;
+    conn->dgram_mss = 1200;
+
+    for (i = 0; i < 1024; i++) {
+        ret = xqc_datagram_send(conn, data, sizeof(data), &dgram_id, XQC_DATA_QOS_HIGH);
+        if (ret != XQC_OK) {
+            break;
+        }
+    }
+
+    uint64_t unsent = xqc_send_queue_get_unsent_packets_num(conn->conn_send_queue);
+    CU_ASSERT_EQUAL(ret, -XQC_EAGAIN);
+    CU_ASSERT(unsent >= 64);
+    CU_ASSERT(unsent <= 65);
+
+    /* without the delay budget, the packet cap applies again */
+    conn->conn_settings.max_dgram_unsent_delay_ms = 0;
+    ret = xqc_datagram_send(conn, data, sizeof(data), &dgram_id, XQC_DATA_QOS_HIGH);
+    CU_ASSERT_EQUAL(ret, XQC_OK);
+
+    conn->conn_flag &= ~XQC_CONN_FLAG_TICKING;
     xqc_engine_destroy(conn->engine);
 }

@@ -759,6 +759,7 @@ xqc_engine_process_conn(xqc_connection_t *conn, xqc_usec_t now)
                     xqc_datagram_notify_write(conn);
                     conn->conn_flag &= ~XQC_CONN_FLAG_DGRAM_WAIT_FOR_1RTT;
                 }
+                xqc_datagram_notify_unsent_room(conn);
             }
 
         } else {
