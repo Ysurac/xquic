@@ -1561,6 +1561,167 @@ xqc_test_wlb_app_limited_path_is_weighted_by_capacity(void)
     wlb_test_teardown(&f);
 }
 
+/* Set path 1's srtt, run one 1 s delivery round, return path 1's picks of 100. */
+static int
+wlb_test_picks_after(wlb_test_fixture_t *f, xqc_usec_t srtt_1)
+{
+    f->send_ctls[1].ctl_srtt = srtt_1;
+    wlb_test_clock_advance(1000000);
+    wlb_test_record_delivery(f, 0, 256 * 1024);
+    wlb_test_record_delivery(f, 1, 256 * 1024);
+    return wlb_test_count_unpinned_path(f, 1, 100);  /* refreshes the weights */
+}
+
+/**
+ * The estimate credit is for an under-fed path. An app-limited path holding
+ * a standing queue -- srtt above its own floor by more than RTT jitter -- is
+ * fed past its rate, so the credit fades out between floor/8 and floor/2 of
+ * queue, or between 2 and 4 rttvar when those are larger. A rise that lasts
+ * past the floor window becomes the new floor and earns the credit back.
+ */
+void
+xqc_test_wlb_queued_path_loses_estimate_credit(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    /* Both paths deliver 256 KiB/s; path 1's estimate is 3x that
+     * (cwnd / srtt = 19660 B / 25 ms), it is app-limited, 25 ms floor. */
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    wlb_test_add_path(&f, 1, 25000, 19660, 0);
+    wlb_test_drain_initial_round(&f);
+    f.send_ctls[1].ctl_app_limited = 1;
+    for (int i = 0; i < 8; i++) {   /* past warm-up */
+        (void)wlb_test_picks_after(&f, 25000);
+    }
+
+    int credited = wlb_test_picks_after(&f, 25000);  /* no queue */
+    int partial  = wlb_test_picks_after(&f, 32500);  /* 7.5 ms: part */
+    f.send_ctls[1].ctl_rttvar = 10000;
+    int jittery  = wlb_test_picks_after(&f, 32500);  /* under 2 * rttvar */
+    int halfway  = wlb_test_picks_after(&f, 55000);  /* 30 ms: half of 2..4 rttvar */
+    f.send_ctls[1].ctl_rttvar = 0;
+    int queued   = wlb_test_picks_after(&f, 40000);  /* >= floor/2 */
+    f.send_ctls[1].ctl_app_limited = 0;
+    int fed      = wlb_test_picks_after(&f, 40000);  /* measured */
+    f.send_ctls[1].ctl_app_limited = 1;
+
+    CU_ASSERT_TRUE(credited > partial + 3);
+    CU_ASSERT_TRUE(jittery > halfway + 3);
+    CU_ASSERT_TRUE(halfway > queued + 3);
+    CU_ASSERT_TRUE(partial > queued + 3);
+    CU_ASSERT_EQUAL(queued, fed);
+
+    /* Hold 40 ms past the 10 s window: it becomes the floor. */
+    int relaxed = 0;
+    for (int i = 0; i < 12; i++) {
+        relaxed = wlb_test_picks_after(&f, 40000);
+    }
+    CU_ASSERT_TRUE(relaxed > queued + 5);
+
+    wlb_test_teardown(&f);
+}
+
+/* One 1 s round in which path 1 delivers 1/16 of the 786,400 B/s estimate
+ * the next test gives it; returns path 1's picks of 100. */
+static int
+wlb_test_light_picks(wlb_test_fixture_t *f)
+{
+    wlb_test_clock_advance(1000000);
+    wlb_test_record_delivery(f, 0, 256 * 1024);
+    wlb_test_record_delivery(f, 1, 48 * 1024);
+    return wlb_test_count_unpinned_path(f, 1, 100);
+}
+
+/**
+ * The floor is the srtt of a loaded path. While a path warms up, or carries
+ * under a quarter of its estimate, its srtt can sit under the loaded value
+ * (a link that delivers in order delays packets more as their rate rises),
+ * and a floor learned there would read the loaded srtt as a queue. A floor
+ * without loaded samples ages out after about a window, so a new, higher
+ * base RTT is not read as a queue for longer than that.
+ */
+void
+xqc_test_wlb_floor_learned_only_under_load(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    /* Path 1's estimate is 3x what it delivers below, and it is app-limited. */
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    wlb_test_add_path(&f, 1, 25000, 19660, 0);
+    wlb_test_drain_initial_round(&f);
+    f.send_ctls[1].ctl_app_limited = 1;
+
+    (void)wlb_test_picks_after(&f, 25000);      /* warm-up: not learned */
+    for (int i = 0; i < 3; i++) {
+        (void)wlb_test_picks_after(&f, 40000);  /* warm-up ends here: floor 40 ms */
+    }
+    int warmed = wlb_test_picks_after(&f, 40000);
+
+    f.send_ctls[1].ctl_srtt = 25000;            /* light load: not learned */
+    for (int i = 0; i < 3; i++) {
+        (void)wlb_test_light_picks(&f);
+    }
+    int loaded = wlb_test_picks_after(&f, 40000);
+
+    int whole = wlb_test_picks_after(&f, 25000);  /* learned: srtt at the floor */
+
+    f.send_ctls[1].ctl_srtt = 60000;            /* new base RTT under light load */
+    int kept = 0;
+    for (int i = 0; i < 10; i++) {
+        kept = wlb_test_light_picks(&f);        /* the 25 ms floor holds: no credit */
+    }
+    int aged = wlb_test_light_picks(&f);        /* 11 s on: the floor has aged out */
+
+    CU_ASSERT_TRUE(warmed + 3 >= whole);
+    CU_ASSERT_TRUE(loaded + 3 >= whole);
+    CU_ASSERT_TRUE(aged > kept + 10);
+
+    wlb_test_teardown(&f);
+}
+
+/**
+ * A sample that delivered nothing is not load, even against an estimate of 0
+ * (BBR has none before its first bandwidth sample, and a quarter of 0 is 0).
+ * Warm-up can end on scheduling time alone; an empty sample taken as load
+ * past it makes the initial srtt the floor, and a path whose srtt turns out
+ * higher then reads as queued and loses its credit until that floor ages out.
+ */
+void
+xqc_test_wlb_empty_sample_is_not_load(void)
+{
+    wlb_test_fixture_t f;
+    wlb_test_setup(&f);
+
+    /* Path 1 has no RTT or bandwidth sample yet: the initial 250 ms srtt and
+     * an estimate of 0. */
+    wlb_test_add_path(&f, 0, 25000, 64 * 1024, 0);
+    wlb_test_add_path(&f, 1, 250000, 19660, 0);
+    f.cong_states[1].bandwidth_Bps = 0;
+    wlb_test_drain_initial_round(&f);
+
+    /* Handed payload every round, path 1 delivers none of it; warm-up ends on
+     * scheduling time after 3 rounds. */
+    for (int i = 0; i < 6; i++) {
+        wlb_test_clock_advance(1000000);
+        wlb_test_record_delivery(&f, 0, 256 * 1024);
+        (void)wlb_test_count_unpinned_path(&f, 1, 100);
+    }
+
+    /* First samples: srtt 400 ms and an estimate of 786,400 B/s, a third of
+     * which the app-limited path delivers. With no floor that is no queue,
+     * and the credit takes path 1 to about 80 of 100 picks against path 0's
+     * ~160 KB/s; a 250 ms floor would cut it to about 20. */
+    f.cong_states[1].bandwidth_Bps = 786400;
+    f.send_ctls[1].ctl_app_limited = 1;
+    int first = wlb_test_picks_after(&f, 400000);
+
+    CU_ASSERT_TRUE(first > 50);
+
+    wlb_test_teardown(&f);
+}
+
 /**
  * A goodput sample has to span real wall clock. Timing the inside of an ACK
  * burst reads a path delivering 1 MiB in 50 ms once a second as a 20 MB/s
