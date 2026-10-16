@@ -643,10 +643,13 @@ xqc_send_ctl_increase_inflight(xqc_connection_t *conn, xqc_packet_out_t *packet_
     xqc_send_ctl_t *send_ctl = path->path_send_ctl;
     if (!(packet_out->po_flag & XQC_POF_IN_FLIGHT) && XQC_CAN_IN_FLIGHT(packet_out->po_frame_types)) {
         if (XQC_IS_ACK_ELICITING(packet_out->po_frame_types)) {
-            if (send_ctl->ctl_bytes_in_flight == 0) {
-                send_ctl->ctl_inflight_since = packet_out->po_sent_time
-                                               ? packet_out->po_sent_time
-                                               : xqc_monotonic_timestamp();
+            if (packet_out->po_pkt.pkt_pns == XQC_PNS_APP_DATA
+                && send_ctl->ctl_bytes_ack_eliciting_inflight[XQC_PNS_APP_DATA]
+                   == 0)
+            {
+                send_ctl->ctl_progress_time = packet_out->po_sent_time
+                                              ? packet_out->po_sent_time
+                                              : xqc_monotonic_timestamp();
             }
             send_ctl->ctl_bytes_in_flight += packet_out->po_used_size;
             send_ctl->ctl_bytes_ack_eliciting_inflight[packet_out->po_pkt.pkt_pns] += packet_out->po_used_size;
@@ -1073,7 +1076,7 @@ xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc
         return XQC_OK;
     }
 
-    send_ctl->ctl_last_ack_progress_time = ack_recv_time;
+    send_ctl->ctl_progress_time = ack_recv_time;
 
     if (update_largest_ack && has_ack_eliciting && ack_on_same_path) {
         if (!ignore_rtt) {
@@ -2078,39 +2081,51 @@ xqc_send_ctl_get_srtt(xqc_send_ctl_t *send_ctl)
 }
 
 /*
- * The PTO timer is restarted by every ack-eliciting packet sent on the path
- * (RFC 9002 6.2.1). On a path that silently stops delivering while the
- * application keeps sending more often than once per PTO, the timer never
- * fires, ctl_pto_count stays 0 and every scheduler keeps choosing the path,
- * so the traffic it carries is lost until its cwnd fills. Count the same
- * backed-off PTO periods from the moment the path last showed progress
- * (bytes in flight became non-zero, or an ACK acknowledged something)
- * instead of from the last send.
+ * Every ack-eliciting packet sent on a path restarts its PTO timer (RFC 9002
+ * Section 6.2.1), and ctl_pto_count only grows when that timer fires. When
+ * a path stops delivering without any error while packets keep being sent
+ * on it more often than once per PTO, the timer never fires, ctl_pto_count
+ * stays 0, and the schedulers keep choosing the path until its cwnd is
+ * full. Count the PTO expiries, with the same backoff, that those sends
+ * hid: from the last progress on the path (ctl_progress_time) to its last
+ * ack-eliciting send. After that send the timer itself, which is not
+ * changed, counts. The inline xqc_send_ctl_get_effective_pto_count() calls
+ * this only once a PTO has passed without progress.
  */
 unsigned
-xqc_send_ctl_get_effective_pto_count(xqc_send_ctl_t *send_ctl, xqc_usec_t now)
+xqc_send_ctl_count_hidden_ptos(xqc_send_ctl_t *send_ctl)
 {
-    unsigned cnt = send_ctl->ctl_pto_count;
-    if (send_ctl->ctl_bytes_ack_eliciting_inflight[XQC_PNS_APP_DATA] == 0
-        || !xqc_conn_is_handshake_confirmed(send_ctl->ctl_conn))
+    xqc_connection_t *conn = send_ctl->ctl_conn;
+    unsigned count = send_ctl->ctl_pto_count;
+    xqc_usec_t last_sent, since, pto;
+    double elapsed, expiry, backoff;
+    unsigned k;
+
+    last_sent =
+        send_ctl->ctl_time_of_last_sent_ack_eliciting_packet[XQC_PNS_APP_DATA];
+    since = send_ctl->ctl_progress_time;
+    pto = xqc_send_ctl_calc_pto(send_ctl);
+    if (since == 0 || last_sent <= since || pto == 0
+        || !xqc_conn_is_handshake_confirmed(conn))
     {
-        return cnt;
+        return count;
     }
 
-    xqc_usec_t since = xqc_max(send_ctl->ctl_inflight_since,
-                               send_ctl->ctl_last_ack_progress_time);
-    xqc_usec_t pto = xqc_send_ctl_calc_pto(send_ctl);
-    if (since == 0 || now <= since || pto == 0) {
-        return cnt;
+    /* the k-th PTO expires sum(backoff^i, i < k) PTO periods after the
+     * last progress; summed in double, so that no step is converted back
+     * to xqc_usec_t, whatever the PTO */
+    elapsed = (double) (last_sent - since);
+    expiry = 0;
+    backoff = 1;
+    for (k = 0; k < XQC_EFFECTIVE_PTO_COUNT_MAX; k++) {
+        expiry += (double) pto * backoff;
+        if (elapsed < expiry) {
+            break;
+        }
+        backoff *= conn->conn_settings.pto_backoff_factor;
     }
 
-    /* PTO k fires (2^k - 1) base periods after the send (backoff factor 2) */
-    uint64_t periods = (now - since) / pto;
-    unsigned virt = 0;
-    while (virt < 16 && periods >= (1ULL << (virt + 1)) - 1) {
-        virt++;
-    }
-    return xqc_max(cnt, virt);
+    return xqc_max(count, k);
 }
 
 float

@@ -4262,6 +4262,45 @@ grep_err_log
 
 
 killall test_server
+${SERVER_BIN} -l d -e -M -Q 65535 -U 1 > /dev/null &
+sleep 1
+
+rm -rf tp_localhost test_session xqc_token
+clear_log
+echo -e "MP datagrams leave a silently failed path ...\c"
+sudo ${CLIENT_BIN} -l d -t 3 -M -i lo -i lo -x 1300 -Q 65535 -U 1 -T 1 -e 1000 --epoch_timeout 20000 > stdlog
+result=`grep "\[dgram\]|silent_path|sent:" stdlog`
+max_gap=`echo "$result" | sed -n 's/.*|max_gap_ms:\([0-9]*\)|.*/\1/p'`
+cli_res=`grep -E "xqc_conn_destroy.*mp_enable:1" clog`
+errlog=`grep_err_log`
+if [ -z "$errlog" ] && [ -n "$max_gap" ] && [ "$max_gap" -lt 1000 ] && [ -n "$cli_res" ]; then
+    echo ">>>>>>>> pass:1"
+    case_print_result "MP_datagrams_leave_silently_failed_path" "pass"
+else
+    echo ">>>>>>>> pass:0"
+    case_print_result "MP_datagrams_leave_silently_failed_path" "fail"
+fi
+grep_err_log
+
+rm -rf tp_localhost test_session xqc_token
+clear_log
+echo -e "MP datagrams resume after every path failed silently ...\c"
+sudo ${CLIENT_BIN} -l d -t 3 -M -i lo -i lo -x 1301 -Q 65535 -U 1 -T 1 -e 1000 --epoch_timeout 20000 > stdlog
+result=`grep "\[dgram\]|silent_path|sent:" stdlog`
+resume=`echo "$result" | sed -n 's/.*|resume_ms:\([0-9]*\)|.*/\1/p'`
+cli_res=`grep -E "xqc_conn_destroy.*mp_enable:1" clog`
+errlog=`grep_err_log`
+if [ -z "$errlog" ] && [ -n "$resume" ] && [ "$resume" -lt 2000 ] && [ -n "$cli_res" ]; then
+    echo ">>>>>>>> pass:1"
+    case_print_result "MP_datagrams_resume_after_all_paths_failed_silently" "pass"
+else
+    echo ">>>>>>>> pass:0"
+    case_print_result "MP_datagrams_resume_after_all_paths_failed_silently" "fail"
+fi
+grep_err_log
+
+
+killall test_server
 stdbuf -oL ${SERVER_BIN} -l d -e -M -Q 65535 -U 1 --pmtud 1 -x 200 > svr_stdlog &
 sleep 1
 
@@ -5692,6 +5731,57 @@ else
     echo ">>>>>>>> pass:0"
     case_print_result "stream_reassembly_cap_pressure_recovery" "fail"
 fi
+
+
+# ── Recovery: per-path app-limited mark after the send step (case IDs 802/803)
+# 802 happy path: the client writes its only request before its second path
+# is validated, and that path then carries no data. The end-of-pass check
+# marks it app-limited (RFC 9002 Section 7.8); the write-time check never
+# runs while it is active.
+killall test_server 2> /dev/null
+${SERVER_BIN} -l d -e -M > /dev/null &
+sleep 1
+rm -rf tp_localhost test_session xqc_token
+clear_log
+echo -e "MP idle path marked app-limited after the send step ...\c"
+sudo ${CLIENT_BIN} -s 1024 -l d -t 1 -E -T 1 -M -i lo -i lo -x 802 > stdlog
+result=`grep ">>>>>>>> pass:1" stdlog`
+marked=`grep "xqc_sample_check_app_limited_after_send|path:1|applimit:" clog`
+errlog=`grep_err_log`
+if [ -z "$errlog" ] && [ -n "$result" ] && [ -n "$marked" ]; then
+    echo ">>>>>>>> pass:1"
+    case_print_result "MP_idle_path_marked_app_limited_after_send" "pass"
+else
+    echo ">>>>>>>> pass:0 (result:${result:+y} marked:${marked:+y} errlog:${errlog:+y})"
+    case_print_result "MP_idle_path_marked_app_limited_after_send" "fail"
+fi
+grep_err_log
+
+# 803 abnormal path: everything the client sends on its second path is lost
+# (-x 803), so the path never validates and is abandoned after
+# XQC_PATH_VALIDATION_MAX_ATTEMPTS PTOs. The end-of-pass check marks the
+# initial path but never the path that did not become active, and every
+# echo completes on the initial path.
+rm -rf tp_localhost test_session xqc_token
+clear_log
+echo -e "MP unvalidated path never marked app-limited ...\c"
+sudo ${CLIENT_BIN} -s 1024 -l d -t 3 -E -T 1 -M -i lo -i lo -x 803 -e 8 > stdlog
+result=`grep ">>>>>>>> pass:1" stdlog`
+failed=`grep ">>>>>>>> pass:0" stdlog`
+abandoned=`grep "|G-P3 validation timeout|path_id:1|" clog`
+marked0=`grep "xqc_sample_check_app_limited_after_send|path:0|applimit:" clog`
+marked1=`grep "xqc_sample_check_app_limited_after_send|path:1|" clog`
+errlog=`grep_err_log`
+if [ -z "$errlog" ] && [ -n "$result" ] && [ -z "$failed" ] \
+    && [ -n "$abandoned" ] && [ -n "$marked0" ] && [ -z "$marked1" ]; then
+    echo ">>>>>>>> pass:1"
+    case_print_result "MP_unvalidated_path_never_marked_app_limited" "pass"
+else
+    echo ">>>>>>>> pass:0 (result:${result:+y} failed:${failed:+y} abandoned:${abandoned:+y}" \
+        "marked0:${marked0:+y} marked1:${marked1:+y} errlog:${errlog:+y})"
+    case_print_result "MP_unvalidated_path_never_marked_app_limited" "fail"
+fi
+grep_err_log
 
 killall test_server 2> /dev/null
 

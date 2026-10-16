@@ -98,6 +98,7 @@
 #include "src/transport/xqc_send_ctl.h"
 #include "src/transport/xqc_multipath.h"
 #include "src/common/xqc_time.h"
+#include "src/congestion_control/xqc_window_filter.h"
 
 /* ---------- constants ---------- */
 
@@ -132,6 +133,9 @@
 /* Minimum wall-clock span for one goodput sample. Sampling faster than this
  * measures the inside of an ACK burst rather than sustained rate. */
 #define WLB_GOODPUT_SAMPLE_MIN_US (200ULL * 1000)
+/* Window for the per-path floor of smoothed RTT, the queue-free reference
+ * for the estimate credit. */
+#define WLB_SRTT_FLOOR_WIN_US (10ULL * 1000000)
 
 /*
  * Tombstone marker for deleted flow table entries.
@@ -168,6 +172,7 @@ typedef struct {
     uint64_t    warmup_active_us;
     uint64_t    last_payload_schedule_us;
     xqc_bool_t  warmup;
+    xqc_win_filter_t srtt_floor; /* lowest srtt over WLB_SRTT_FLOOR_WIN_US */
 } wlb_path_weight_t;
 
 /** Top-level scheduler state, allocated by xquic via xqc_wlb_scheduler_size(). */
@@ -335,8 +340,8 @@ wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
         /* Blackholed paths can stay ACTIVE without socket error. Treat a path
          * with repeated PTOs as unhealthy for recovery-detection purposes. */
         if (scan_path->path_send_ctl
-            && xqc_send_ctl_get_effective_pto_count(scan_path->path_send_ctl,
-                   xqc_monotonic_timestamp()) >= WLB_PTO_EVICT_THRESH)
+            && xqc_send_ctl_get_effective_pto_count(scan_path->path_send_ctl)
+               >= WLB_PTO_EVICT_THRESH)
         {
             continue;
         }
@@ -513,8 +518,8 @@ static xqc_bool_t
 wlb_path_blackholed(xqc_path_ctx_t *path)
 {
     return path->path_send_ctl != NULL
-           && xqc_send_ctl_get_effective_pto_count(path->path_send_ctl,
-                  xqc_monotonic_timestamp()) >= WLB_PTO_EVICT_THRESH;
+           && xqc_send_ctl_get_effective_pto_count(path->path_send_ctl)
+              >= WLB_PTO_EVICT_THRESH;
 }
 
 /* A standby (PATH_STATUS_BACKUP) path that must not get new data because a
@@ -572,6 +577,7 @@ wlb_compute_goodput_weight(wlb_path_weight_t *entry, xqc_path_ctx_t *path,
      * idle. A bursty high-latency link therefore out-weighted links that
      * were genuinely carrying more, and the aggregate fell below a single
      * path. Zero-delivery samples are included precisely so idle decays. */
+    xqc_bool_t loaded = XQC_FALSE;
     if (now_us >= entry->prior_delivered_time_us
         && now_us - entry->prior_delivered_time_us >= WLB_GOODPUT_SAMPLE_MIN_US)
     {
@@ -586,6 +592,9 @@ wlb_compute_goodput_weight(wlb_path_weight_t *entry, xqc_path_ctx_t *path,
         entry->warmup_acked_bytes += delivered;
         entry->prior_delivered = entry->app_delivered;
         entry->prior_delivered_time_us = now_us;
+        /* An empty sample is never load: BBR's estimate is 0 before its first
+         * bandwidth sample, and 0 B/s is a quarter of that. */
+        loaded = delivered > 0 && sample_Bps >= xqc_send_ctl_get_est_bw(ctl) / 4;
     }
 
     if (entry->warmup
@@ -594,6 +603,19 @@ wlb_compute_goodput_weight(wlb_path_weight_t *entry, xqc_path_ctx_t *path,
     {
         entry->warmup = XQC_FALSE;
     }
+
+    /* Not min_rtt: on a jittery link min_rtt is the luckiest single sample,
+     * often well under the queue-free srtt. The floor learns only from
+     * samples past warm-up in which the path delivered a quarter of its
+     * estimate; every other refresh feeds UINT64_MAX. A link that delivers
+     * in order delays packets more as their rate rises, so a floor learned
+     * idle or mid-ramp would read the loaded srtt as a queue. Within about a
+     * window, a queue that persists under load becomes the floor and a floor
+     * without loaded samples ages out; the 2*min_rtt haircut below still
+     * applies. */
+    xqc_usec_t srtt = xqc_send_ctl_get_srtt(ctl);
+    uint64_t srtt_floor = xqc_win_filter_min(&entry->srtt_floor, WLB_SRTT_FLOOR_WIN_US, now_us,
+                                             loaded && !entry->warmup ? srtt : UINT64_MAX);
 
     uint64_t weight = entry->goodput_ewma_Bps;
     if (weight > 0) {
@@ -615,7 +637,21 @@ wlb_compute_goodput_weight(wlb_path_weight_t *entry, xqc_path_ctx_t *path,
         if (xqc_send_ctl_is_app_limited(ctl)) {
             uint64_t capacity_Bps = xqc_send_ctl_get_est_bw(ctl);
             if (capacity_Bps > weight) {
-                weight = capacity_Bps;
+                /* An app-limited path holding a standing queue is fed past
+                 * its rate: BBR ignores app-limited samples below its
+                 * estimate, so the estimate stays at the old rate. Fade the
+                 * credit out with the queue beyond RTT jitter (rttvar). */
+                uint64_t credit = capacity_Bps - weight;
+                /* No floor (none yet, or aged out), or srtt under it: no queue. */
+                uint64_t queue = srtt > srtt_floor ? srtt - srtt_floor : 0;
+                uint64_t fade_lo = xqc_max(srtt_floor / 8, 2 * ctl->ctl_rttvar);
+                uint64_t fade_hi = xqc_max(srtt_floor / 2, 4 * ctl->ctl_rttvar);
+                if (queue > fade_lo) {
+                    credit = queue < fade_hi
+                             ? credit * (fade_hi - queue) / (fade_hi - fade_lo)
+                             : 0;
+                }
+                weight += credit;
             }
         }
         /* Measured acked goodput is already net of every lost packet, so
@@ -840,6 +876,8 @@ wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
         entry.path_id = path->path_id;
         entry.warmup = XQC_TRUE;
         entry.prior_delivered_time_us = xqc_monotonic_timestamp();
+        /* Start above any srtt so the first sample becomes the floor. */
+        xqc_win_filter_reset(&entry.srtt_floor, 0, UINT64_MAX);
         for (int j = 0; j < old_n; j++) {
             if (old[j].path_id == path->path_id) {
                 entry = old[j];
@@ -1023,8 +1061,8 @@ wlb_minrtt_fallback(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
          * po_flow_hash==0 packets via this MinRTT fallback, so omitting the
          * PTO guard can stall failover even if app datagrams are re-pinned. */
         if (path->path_send_ctl
-            && xqc_send_ctl_get_effective_pto_count(path->path_send_ctl,
-                   xqc_monotonic_timestamp()) >= WLB_PTO_EVICT_THRESH)
+            && xqc_send_ctl_get_effective_pto_count(path->path_send_ctl)
+               >= WLB_PTO_EVICT_THRESH)
         {
             continue;
         }

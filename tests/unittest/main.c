@@ -16,6 +16,7 @@
 #include "xqc_recv_record_test.h"
 #include "xqc_reno_test.h"
 #include "xqc_cubic_test.h"
+#include "xqc_bbr2_test.h"
 #include "xqc_packet_test.h"
 #include "xqc_stream_frame_test.h"
 #include "xqc_process_frame_test.h"
@@ -54,9 +55,11 @@
 #include "xqc_redundant_test.h"
 #include "xqc_dscp_test.h"
 #include "xqc_scheduler_standby_test.h"
+#include "xqc_conn_reapply_test.h"
 #include "xqc_send_ctl_test.h"
 #include "xqc_vn_test.h"
 #include "xqc_frame_type_bit_test.h"
+#include "xqc_applimit_test.h"
 
 static int
 xqc_init_suite(void)
@@ -104,6 +107,8 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_conn_early_data_reject", xqc_test_conn_early_data_reject)
         || !CU_add_test(pSuite, "xqc_test_conn_early_data_reject_flow_ctl", xqc_test_conn_early_data_reject_flow_ctl)
         || !CU_add_test(pSuite, "xqc_test_conn_stream_unsent_cap", xqc_test_conn_stream_unsent_cap)
+        || !CU_add_test(pSuite, "xqc_test_conn_closed_path_perf_class", xqc_test_conn_closed_path_perf_class)
+        || !CU_add_test(pSuite, "xqc_test_conn_open_path_perf_class", xqc_test_conn_open_path_perf_class)
         /* RFC 9000 §20.1 CRYPTO_ERROR dynamic construction */
         || !CU_add_test(pSuite, "xqc_test_conn_tls_error_cb_constructs_crypto_error", xqc_test_conn_tls_error_cb_constructs_crypto_error)
         || !CU_add_test(pSuite, "xqc_test_conn_crypto_error_base_value", xqc_test_conn_crypto_error_base_value)
@@ -119,6 +124,8 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_reno_init_cwnd_override", xqc_test_reno_init_cwnd_override)
         || !CU_add_test(pSuite, "xqc_test_cubic", xqc_test_cubic)
         || !CU_add_test(pSuite, "xqc_test_cubic_init_cwnd", xqc_test_cubic_init_cwnd)
+        || !CU_add_test(pSuite, "xqc_test_bbr2_probe_wait_fast_convergence", xqc_test_bbr2_probe_wait_fast_convergence)
+        || !CU_add_test(pSuite, "xqc_test_bbr2_probe_wait_bounds", xqc_test_bbr2_probe_wait_bounds)
         || !CU_add_test(pSuite, "xqc_test_short_header_parse_cid", xqc_test_short_header_packet_parse_cid)
         || !CU_add_test(pSuite, "xqc_test_long_header_parse_cid", xqc_test_long_header_packet_parse_cid)
         || !CU_add_test(pSuite, "xqc_test_crypto_frame_flood", xqc_test_crypto_frame_flood)
@@ -137,16 +144,16 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_empty_pkt", xqc_test_empty_pkt)
         || !CU_add_test(pSuite, "xqc_test_stateless_reset_parse_boundary", xqc_test_stateless_reset_parse_boundary)
         || !CU_add_test(pSuite, "xqc_test_transport_params", xqc_test_transport_params)
+        || !CU_add_test(pSuite, "xqc_test_tp_value_not_longer_than_len",
+                        xqc_test_tp_value_not_longer_than_len)
+        || !CU_add_test(pSuite, "xqc_test_tp_value_matches_len_decodes",
+                        xqc_test_tp_value_matches_len_decodes)
         || !CU_add_test(pSuite, "xqc_test_max_ack_delay_default_when_absent",
                         xqc_test_max_ack_delay_default_when_absent)
         || !CU_add_test(pSuite, "xqc_test_max_ack_delay_valid_boundary",
                         xqc_test_max_ack_delay_valid_boundary)
         || !CU_add_test(pSuite, "xqc_test_max_ack_delay_invalid_boundary",
                         xqc_test_max_ack_delay_invalid_boundary)
-        || !CU_add_test(pSuite, "xqc_test_tp_value_not_longer_than_len",
-                        xqc_test_tp_value_not_longer_than_len)
-        || !CU_add_test(pSuite, "xqc_test_tp_value_matches_len_decodes",
-                        xqc_test_tp_value_matches_len_decodes)
         || !CU_add_test(pSuite, "xqc_test_tp_cid_overflow", xqc_test_tp_cid_overflow)
         || !CU_add_test(pSuite, "xqc_test_check_transport_params_cids", xqc_test_check_transport_params_cids)
         || !CU_add_test(pSuite, "xqc_test_engine_packet_process", xqc_test_engine_packet_process)
@@ -265,15 +272,11 @@ main(int argc, char *argv[])
                         xqc_test_send_ctl_single_loss_does_not_reset_rtt)
         || !CU_add_test(pSuite, "xqc_test_send_ctl_persistent_congestion_no_rtt_sample_early_return",
                         xqc_test_send_ctl_persistent_congestion_no_rtt_sample_early_return)
-        /* unresponsive path while the scheduler keeps sending on it */
-        || !CU_add_test(pSuite, "xqc_test_send_ctl_effective_pto_count_backoff",
-                        xqc_test_send_ctl_effective_pto_count_backoff)
-        || !CU_add_test(pSuite, "xqc_test_send_ctl_effective_pto_count_inactive",
-                        xqc_test_send_ctl_effective_pto_count_inactive)
-        || !CU_add_test(pSuite, "xqc_test_send_ctl_inflight_since_first_packet",
-                        xqc_test_send_ctl_inflight_since_first_packet)
-        || !CU_add_test(pSuite, "xqc_test_send_ctl_unresponsive_path_perf_class",
-                        xqc_test_send_ctl_unresponsive_path_perf_class)
+        /* silently failed path: PTO expiries hidden by sends */
+        || !CU_add_test(pSuite, "xqc_test_effective_pto_count_silent_path",
+                        xqc_test_effective_pto_count_silent_path)
+        || !CU_add_test(pSuite, "xqc_test_effective_pto_count_bounds",
+                        xqc_test_effective_pto_count_bounds)
         /* RFC 9000 §6.2 Version Negotiation abort suite */
         || !CU_add_test(pSuite, "xqc_test_vn_abort_on_unsupported_version", xqc_test_vn_abort_on_unsupported_version)
         || !CU_add_test(pSuite, "xqc_test_vn_downgrade_protection_when_version_matches", xqc_test_vn_downgrade_protection_when_version_matches)
@@ -454,6 +457,10 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_wlb_stream_data_never_rides_a_blackholed_path", xqc_test_wlb_stream_data_never_rides_a_blackholed_path)
         || !CU_add_test(pSuite, "xqc_test_wlb_blackholed_path_does_not_stall_rounds", xqc_test_wlb_blackholed_path_does_not_stall_rounds)
         || !CU_add_test(pSuite, "xqc_test_wlb_unpinned_blackhole_refreshes_topology", xqc_test_wlb_unpinned_blackhole_refreshes_topology)
+        || !CU_add_test(pSuite, "xqc_test_wlb_unresponsive_path_evicted_before_pto", xqc_test_wlb_unresponsive_path_evicted_before_pto)
+        || !CU_add_test(pSuite, "xqc_test_wlb_acked_path_not_evicted", xqc_test_wlb_acked_path_not_evicted)
+        || !CU_add_test(pSuite, "xqc_test_wlb_unacked_path_kept_until_third_hidden_pto", xqc_test_wlb_unacked_path_kept_until_third_hidden_pto)
+        || !CU_add_test(pSuite, "xqc_test_wlb_all_paths_silent_recover_on_ack", xqc_test_wlb_all_paths_silent_recover_on_ack)
         || !CU_add_test(pSuite, "xqc_test_wlb_routine_path_event_preserves_round", xqc_test_wlb_routine_path_event_preserves_round)
         || !CU_add_test(pSuite, "xqc_test_wlb_measured_goodput_ignores_loss_penalty", xqc_test_wlb_measured_goodput_ignores_loss_penalty)
         || !CU_add_test(pSuite, "xqc_test_wlb_idle_path_goodput_decays", xqc_test_wlb_idle_path_goodput_decays)
@@ -466,6 +473,9 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_wlb_active_time_ends_warmup", xqc_test_wlb_active_time_ends_warmup)
         || !CU_add_test(pSuite, "xqc_test_wlb_idle_time_does_not_end_warmup", xqc_test_wlb_idle_time_does_not_end_warmup)
         || !CU_add_test(pSuite, "xqc_test_wlb_app_limited_path_is_weighted_by_capacity", xqc_test_wlb_app_limited_path_is_weighted_by_capacity)
+        || !CU_add_test(pSuite, "xqc_test_wlb_queued_path_loses_estimate_credit", xqc_test_wlb_queued_path_loses_estimate_credit)
+        || !CU_add_test(pSuite, "xqc_test_wlb_floor_learned_only_under_load", xqc_test_wlb_floor_learned_only_under_load)
+        || !CU_add_test(pSuite, "xqc_test_wlb_empty_sample_is_not_load", xqc_test_wlb_empty_sample_is_not_load)
         || !CU_add_test(pSuite, "xqc_test_wlb_goodput_sample_ignores_sub_interval_burst", xqc_test_wlb_goodput_sample_ignores_sub_interval_burst)
         || !CU_add_test(pSuite, "xqc_test_wlb_path_stats_snapshot", xqc_test_wlb_path_stats_snapshot)
         || !CU_add_test(pSuite, "xqc_test_wlb_pinned_flow_refreshes_delivery_sample", xqc_test_wlb_pinned_flow_refreshes_delivery_sample)
@@ -484,6 +494,34 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_standby_wlb_reinject_may_use_standby", xqc_test_standby_wlb_reinject_may_use_standby)
         || !CU_add_test(pSuite, "xqc_test_standby_perf_class_rule", xqc_test_standby_perf_class_rule)
         || !CU_add_test(pSuite, "xqc_test_standby_other_schedulers", xqc_test_standby_other_schedulers)
+        || !CU_add_test(pSuite, "xqc_test_reapply_minrtt_to_wlb", xqc_test_reapply_minrtt_to_wlb)
+        || !CU_add_test(pSuite, "xqc_test_reapply_same_vtable_keeps_state", xqc_test_reapply_same_vtable_keeps_state)
+        || !CU_add_test(pSuite, "xqc_test_reapply_refuses_two_paths", xqc_test_reapply_refuses_two_paths)
+        || !CU_add_test(pSuite, "xqc_test_reapply_rejects_bad_args", xqc_test_reapply_rejects_bad_args)
+        || !CU_add_test(pSuite, "xqc_test_reapply_params_zero_keeps_current", xqc_test_reapply_params_zero_keeps_current)
+        || !CU_add_test(pSuite, "xqc_test_reapply_params_override", xqc_test_reapply_params_override)
+        || !CU_add_test(pSuite, "xqc_test_reapply_refuses_created_path_count", xqc_test_reapply_refuses_created_path_count)
+        || !CU_add_test(pSuite, "xqc_test_reapply_refuses_active_path_count", xqc_test_reapply_refuses_active_path_count)
+        || !CU_add_test(pSuite, "xqc_test_reapply_refuses_datagram_redundancy", xqc_test_reapply_refuses_datagram_redundancy)
+        || !CU_add_test(pSuite, "xqc_test_reapply_same_as_active_global_vtable", xqc_test_reapply_same_as_active_global_vtable)
+        || !CU_add_test(pSuite, "xqc_test_reapply_same_vtable_params_land", xqc_test_reapply_same_vtable_params_land)
+        || !CU_add_test(pSuite, "xqc_test_wlb_reapply_second_path_after_swap", xqc_test_wlb_reapply_second_path_after_swap)
+        || !CU_add_test(pSuite, "xqc_test_wlb_reapply_from_minrtt_schedules", xqc_test_wlb_reapply_from_minrtt_schedules)
+        || !CU_add_test(pSuite, "xqc_test_wlb_reapply_to_minrtt_schedules", xqc_test_wlb_reapply_to_minrtt_schedules)
+        /* per-path app-limited marking at the end of each engine pass */
+        || !CU_add_test(pSuite, "xqc_test_applimit_unfed_path_conn_logic", xqc_test_applimit_unfed_path_conn_logic)
+        || !CU_add_test(pSuite, "xqc_test_applimit_unfed_path_main_logic", xqc_test_applimit_unfed_path_main_logic)
+        || !CU_add_test(pSuite, "xqc_test_applimit_idle_path_conn_logic", xqc_test_applimit_idle_path_conn_logic)
+        || !CU_add_test(pSuite, "xqc_test_applimit_idle_path_main_logic", xqc_test_applimit_idle_path_main_logic)
+        || !CU_add_test(pSuite, "xqc_test_applimit_idle_path_batch_send", xqc_test_applimit_idle_path_batch_send)
+        || !CU_add_test(pSuite, "xqc_test_applimit_next_packet_flagged", xqc_test_applimit_next_packet_flagged)
+        || !CU_add_test(pSuite, "xqc_test_applimit_pacing_held_packet", xqc_test_applimit_pacing_held_packet)
+        || !CU_add_test(pSuite, "xqc_test_applimit_pacing_held_packet_wlb", xqc_test_applimit_pacing_held_packet_wlb)
+        || !CU_add_test(pSuite, "xqc_test_applimit_cwnd_full", xqc_test_applimit_cwnd_full)
+        || !CU_add_test(pSuite, "xqc_test_applimit_sndbuf_full", xqc_test_applimit_sndbuf_full)
+        || !CU_add_test(pSuite, "xqc_test_applimit_lingering_ack_only", xqc_test_applimit_lingering_ack_only)
+        || !CU_add_test(pSuite, "xqc_test_applimit_marker_value", xqc_test_applimit_marker_value)
+        || !CU_add_test(pSuite, "xqc_test_applimit_pacer_untouched", xqc_test_applimit_pacer_untouched)
         /* ADD TESTS HERE */)
     {
         CU_cleanup_registry();

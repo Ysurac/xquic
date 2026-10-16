@@ -99,6 +99,7 @@ if(HAVE_CUNIT)
         ${UNIT_TEST_DIR}/xqc_recv_record_test.c
         ${UNIT_TEST_DIR}/xqc_reno_test.c
         ${UNIT_TEST_DIR}/xqc_cubic_test.c
+        ${UNIT_TEST_DIR}/xqc_bbr2_test.c
         ${UNIT_TEST_DIR}/xqc_stream_frame_test.c
         ${UNIT_TEST_DIR}/xqc_process_frame_test.c
         ${UNIT_TEST_DIR}/xqc_tp_test.c
@@ -133,9 +134,11 @@ if(HAVE_CUNIT)
         ${UNIT_TEST_DIR}/xqc_redundant_test.c
         ${UNIT_TEST_DIR}/xqc_dscp_test.c
         ${UNIT_TEST_DIR}/xqc_scheduler_standby_test.c
+        ${UNIT_TEST_DIR}/xqc_conn_reapply_test.c
         ${UNIT_TEST_DIR}/xqc_send_ctl_test.c
         ${UNIT_TEST_DIR}/xqc_vn_test.c
         ${UNIT_TEST_DIR}/xqc_frame_type_bit_test.c
+        ${UNIT_TEST_DIR}/xqc_applimit_test.c
     )
 
     if(XQC_ENABLE_FEC)

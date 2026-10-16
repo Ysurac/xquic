@@ -10,6 +10,8 @@ void xqc_test_conn_idle_timeout();
 void xqc_test_conn_early_data_reject();
 void xqc_test_conn_early_data_reject_flow_ctl();
 void xqc_test_conn_stream_unsent_cap();
+void xqc_test_conn_closed_path_perf_class(void);
+void xqc_test_conn_open_path_perf_class(void);
 
 /* RFC 9000 §20.1 CRYPTO_ERROR dynamic construction */
 void xqc_test_conn_tls_error_cb_constructs_crypto_error();

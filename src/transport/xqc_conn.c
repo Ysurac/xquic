@@ -4031,6 +4031,58 @@ xqc_conn_set_dscp(xqc_connection_t *conn, uint8_t dscp)
     conn->next_dscp = dscp & 0x3F;  /* DSCP is a 6-bit codepoint (0-63) */
 }
 
+xqc_int_t
+xqc_conn_reapply_settings(xqc_connection_t *conn, const xqc_conn_settings_t *settings,
+                          uint32_t fields)
+{
+    if (conn == NULL || settings == NULL || fields == 0
+        || (fields & ~XQC_CONN_REAPPLY_SCHEDULER)
+        || settings->scheduler_callback.xqc_scheduler_size == NULL
+        || settings->scheduler_callback.xqc_scheduler_init == NULL
+        || settings->scheduler_callback.xqc_scheduler_get_path == NULL)
+    {
+        return -XQC_EPARAM;
+    }
+
+    /* datagram redundancy pins rap/minrtt and the dgram reinjection controller */
+    if (conn->create_path_count != 1 || conn->active_path_count > 1
+        || conn->conn_settings.datagram_redundancy != 0)
+    {
+        return -XQC_ESTATE;
+    }
+
+    /* read only the scheduler fields of the caller's settings */
+    xqc_conn_settings_t tmp;
+    xqc_memzero(&tmp, sizeof(tmp));
+    tmp.scheduler_callback = settings->scheduler_callback;
+    tmp.scheduler_params = settings->scheduler_params;
+    xqc_conn_set_default_sched_params(&conn->conn_settings, &tmp);
+
+    if (memcmp(&tmp.scheduler_callback, conn->scheduler_callback,
+               sizeof(tmp.scheduler_callback)) == 0)
+    {
+        conn->conn_settings.scheduler_callback = tmp.scheduler_callback;
+        conn->conn_settings.scheduler_params = tmp.scheduler_params;
+        conn->scheduler_callback = &conn->conn_settings.scheduler_callback;
+        return XQC_OK;
+    }
+
+    void *state = xqc_pcalloc(conn->conn_pool, tmp.scheduler_callback.xqc_scheduler_size());
+    if (state == NULL) {
+        return -XQC_EMALLOC;
+    }
+
+    conn->conn_settings.scheduler_callback = tmp.scheduler_callback;
+    conn->conn_settings.scheduler_params = tmp.scheduler_params;
+    conn->scheduler_callback = &conn->conn_settings.scheduler_callback;
+    /* the old state block stays in conn_pool until the connection is destroyed */
+    conn->scheduler = state;
+    conn->scheduler_callback->xqc_scheduler_init(conn->scheduler, conn->log,
+                                                 &conn->conn_settings.scheduler_params);
+    xqc_log(conn->log, XQC_LOG_INFO, "|reapply scheduler|");
+    return XQC_OK;
+}
+
 xqc_conn_qos_stats_t
 xqc_conn_get_qos_stats(xqc_engine_t *engine, const xqc_cid_t *cid)
 {
