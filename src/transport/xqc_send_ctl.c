@@ -566,6 +566,27 @@ xqc_send_ctl_recover_stale_next(xqc_list_head_t **next, xqc_list_head_t *list_he
     }
 }
 
+/* Unlink packet_out from the list it is on. A packet still in a path's
+ * schedule buffer must leave it through xqc_path_send_buffer_remove(), which
+ * also gives its bytes back to path_schedule_bytes; dropping it with a bare
+ * list delete leaks them, and once a path's leaked schedule bytes reach its
+ * cwnd the scheduler sees it blocked forever with nothing in flight. */
+static void
+xqc_send_queue_unlink_po(xqc_packet_out_t *packet_out, xqc_send_queue_t *send_queue,
+    xqc_path_ctx_t *path)
+{
+    if (packet_out->po_flag & XQC_POF_IN_PATH_BUF_LIST) {
+        if (path == NULL || path->path_id != packet_out->po_path_id) {
+            path = xqc_conn_find_path_by_path_id(send_queue->sndq_conn, packet_out->po_path_id);
+        }
+        if (path != NULL) {
+            xqc_path_send_buffer_remove(path, packet_out);
+            return;
+        }
+    }
+    xqc_send_queue_remove_unacked(packet_out, send_queue);
+}
+
 void
 xqc_send_queue_maybe_remove_unacked(xqc_packet_out_t *packet_out, xqc_send_queue_t *send_queue, xqc_path_ctx_t *path)
 {
@@ -592,19 +613,17 @@ xqc_send_queue_maybe_remove_unacked(xqc_packet_out_t *packet_out, xqc_send_queue
         return;
     }
 
-    if (path && (packet_out->po_flag & XQC_POF_IN_PATH_BUF_LIST)) {
-        xqc_path_send_buffer_remove(path, packet_out);
-
-    } else {
-        xqc_send_queue_remove_unacked(packet_out, send_queue);
-    }
+    xqc_send_queue_unlink_po(packet_out, send_queue, path);
 
     if (packet_out->po_origin
         && (--packet_out->po_origin->po_origin_ref_cnt) == 0)
     {
         /* po_origin could be an inflight one, thus requiring decrease inflight. */
         xqc_send_ctl_decrease_inflight(send_queue->sndq_conn, packet_out->po_origin);
-        xqc_send_queue_remove_unacked(packet_out->po_origin, send_queue); /* TODO: ensure reinject packet will in path buf (not support yet) */
+        /* A redundant-scheduler origin can still sit, unsent, in its path's
+         * schedule buffer when a replica is acked on a faster path: take it
+         * out through the path buffer so path_schedule_bytes goes down too. */
+        xqc_send_queue_unlink_po(packet_out->po_origin, send_queue, NULL);
         xqc_send_queue_insert_free(packet_out->po_origin, &send_queue->sndq_free_packets, send_queue);
     }
 
