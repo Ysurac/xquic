@@ -506,6 +506,32 @@ static int
 xqc_client_mtu_dropped(const unsigned char *buf, size_t size)
 {
     static int full_pkts = 0;
+    static int big_pkts = 0;
+
+    /* case 806: the path shrinks during the transfer, after 300 datagrams
+     * above 1300 bytes got through, and drops every one of them from then on */
+    if (g_test_case == 806) {
+        return size > XQC_TEST_CASE_PATH_MTU && ++big_pkts > 300;
+    }
+
+    /* case 807: the path is smaller than the base size (1298) from the
+     * start: only datagrams up to 1260 bytes get through */
+    if (g_test_case == 807) {
+        return size > 1260;
+    }
+
+    /* case 808: an outage at the base size: after 300 short header
+     * packets, every datagram is lost for one second */
+    if (g_test_case == 808) {
+        static uint64_t outage_start = 0;
+        if (outage_start == 0) {
+            if ((buf[0] & 0x80) == 0 && ++full_pkts == 300) {
+                outage_start = xqc_now();
+            }
+            return outage_start != 0;
+        }
+        return xqc_now() - outage_start < 1000000;
+    }
 
     if (g_test_case != 804 && g_test_case != 805) {
         return 0;
@@ -1245,7 +1271,7 @@ xqc_client_write_socket(const unsigned char *buf, size_t size,
     memcpy(send_buf, buf, send_buf_size);
     xqc_test_record_udp_payload(size);
 
-    /* cases 804-805 */
+    /* cases 804-808 */
     if (xqc_client_mtu_dropped(buf, size)) {
         return size;
     }
@@ -1400,8 +1426,16 @@ xqc_client_write_socket_ex(uint64_t path_id,
         return size;
     }
 
-    /* cases 804-805 */
+    /* cases 804-808 */
     if (xqc_client_mtu_dropped(buf, size)) {
+        return size;
+    }
+
+    /* cases 809-810: the second path carries only 1300 bytes, less than
+     * what the first one was found to carry */
+    if ((g_test_case == 809 || g_test_case == 810) && path_id == 1
+        && size > 1300)
+    {
         return size;
     }
 
@@ -2058,7 +2092,9 @@ xqc_client_create_conn_socket(user_conn_t *user_conn)
 void
 xqc_client_set_path_debug_timer(user_conn_t *user_conn)
 {
-    if (g_debug_path || g_test_case == 110) {
+    if (g_debug_path || g_test_case == 110
+        || (g_test_case == 810 && g_client_path[1].is_in_used == 0))
+    {
         if (user_conn->ev_path == NULL) {
             user_conn->ev_path = event_new(eb, -1, 0, xqc_client_path_callback, user_conn);
         }
@@ -4318,7 +4354,8 @@ xqc_client_path_callback(int fd, short what, void *arg)
         xqc_client_set_path_debug_timer(user_conn);
     }
 
-    if (b_add_path == 0) {
+    /* case 810: one path added, none removed */
+    if (b_add_path == 0 && g_test_case != 810) {
         static int base = 0;
         int path_index = rand() % 2;
         base++;
@@ -4599,7 +4636,8 @@ xqc_client_ready_to_create_path(const xqc_cid_t *cid,
         return;
     }
 
-    if (g_test_case != 110) {
+    /* case 810: the second path comes later, from the path debug timer */
+    if (g_test_case != 110 && g_test_case != 810) {
         for (int i = 0; i < g_multi_interface_cnt; i++) {
             if (g_client_path[i].is_in_used == 1) {
                 continue;
@@ -5661,6 +5699,21 @@ int main(int argc, char *argv[]) {
 
     if (g_test_case == 736) {
         conn_settings.max_pkt_out_size = 1500;
+    }
+
+    /* cases 807-810: mqvpn's base size, and no search above it in 808 */
+    if (g_test_case == 807 || g_test_case == 808
+        || g_test_case == 809 || g_test_case == 810)
+    {
+        conn_settings.max_pkt_out_size = 1298;
+    }
+    /* case 810: the second path once the first has grown, after
+     * XQC_PMTUD_START_DELAY (multipath waits that long to start PMTUD) */
+    if (g_test_case == 810) {
+        g_path_timeout = 7000000;
+    }
+    if (g_test_case == 808) {
+        conn_settings.probing_pkt_out_size = 1298;
     }
     
 

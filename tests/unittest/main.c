@@ -54,6 +54,7 @@
 #include "xqc_wlb_test.h"
 #include "xqc_conn_reapply_test.h"
 #include "xqc_send_ctl_test.h"
+#include "xqc_pmtud_test.h"
 #include "xqc_vn_test.h"
 #include "xqc_frame_type_bit_test.h"
 #include "xqc_applimit_test.h"
@@ -281,6 +282,72 @@ main(int argc, char *argv[])
                         xqc_test_send_ctl_lost_pmtud_probe_no_cc_reaction)
         || !CU_add_test(pSuite, "xqc_test_send_ctl_lost_packet_cc_reaction",
                         xqc_test_send_ctl_lost_packet_cc_reaction)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_big_losses_make_path_suspect",
+                        xqc_test_pmtud_big_losses_make_path_suspect)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_small_losses_do_not_make_path_suspect",
+                        xqc_test_pmtud_small_losses_do_not_make_path_suspect)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_blackhole_confirmed_by_probes",
+                        xqc_test_pmtud_blackhole_confirmed_by_probes)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_search_probe_loss_is_not_blackhole",
+                        xqc_test_pmtud_search_probe_loss_is_not_blackhole)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_blackhole_at_base_goes_to_floor",
+                        xqc_test_pmtud_blackhole_at_base_goes_to_floor)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_outage_at_base_keeps_base",
+                        xqc_test_pmtud_outage_at_base_keeps_base)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_split_lost_stream_packet",
+                        xqc_test_pmtud_split_lost_stream_packet)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_split_lost_rejects_other_packets",
+                        xqc_test_pmtud_split_lost_rejects_other_packets)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_drop_oversize_datagram",
+                        xqc_test_pmtud_drop_oversize_datagram)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_drop_oversize_keeps_probes_and_fitting",
+                        xqc_test_pmtud_drop_oversize_keeps_probes_and_fitting)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_search_stops_within_precision",
+                        xqc_test_pmtud_search_stops_within_precision)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_search_probes_wide_range",
+                        xqc_test_pmtud_search_probes_wide_range)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_outage_is_not_blackhole",
+                        xqc_test_pmtud_outage_is_not_blackhole)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_acked_large_data_clears_suspicion",
+                        xqc_test_pmtud_acked_large_data_clears_suspicion)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_acked_small_data_keeps_suspicion",
+                        xqc_test_pmtud_acked_small_data_keeps_suspicion)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_blackhole_probes_one_rtt_apart",
+                        xqc_test_pmtud_blackhole_probes_one_rtt_apart)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_pto_on_suspect_path_sends_probe",
+                        xqc_test_pmtud_pto_on_suspect_path_sends_probe)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_lost_search_probe_retries_soon",
+                        xqc_test_pmtud_lost_search_probe_retries_soon)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_stale_probe_loss_does_not_retry",
+                        xqc_test_pmtud_stale_probe_loss_does_not_retry)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_dgram_with_copy_lost_once",
+                        xqc_test_pmtud_dgram_with_copy_lost_once)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_path_challenge_padded_to_1200",
+                        xqc_test_pmtud_path_challenge_padded_to_1200)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_probe_padded_to_probed_size",
+                        xqc_test_pmtud_probe_padded_to_probed_size)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_new_path_lowers_connection_size",
+                        xqc_test_pmtud_new_path_lowers_connection_size)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_new_path_not_smaller_keeps_size",
+                        xqc_test_pmtud_new_path_not_smaller_keeps_size)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_pto_before_1rtt_sends_no_probe",
+                        xqc_test_pmtud_pto_before_1rtt_sends_no_probe)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_split_keeps_control_frames",
+                        xqc_test_pmtud_split_keeps_control_frames)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_split_control_only_packet",
+                        xqc_test_pmtud_split_control_only_packet)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_mixed_datagram_not_dropped",
+                        xqc_test_pmtud_mixed_datagram_not_dropped)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_control_frame_not_added_to_datagram",
+                        xqc_test_pmtud_control_frame_not_added_to_datagram)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_off_control_frame_shares_datagram",
+                        xqc_test_pmtud_off_control_frame_shares_datagram)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_split_skips_reset_stream",
+                        xqc_test_pmtud_split_skips_reset_stream)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_unneeded_rest_keeps_packet_count",
+                        xqc_test_pmtud_unneeded_rest_keeps_packet_count)
+        || !CU_add_test(pSuite, "xqc_test_pmtud_blackhole_above_conn_size_clamps_probe",
+                        xqc_test_pmtud_blackhole_above_conn_size_clamps_probe)
         /* silently failed path: PTO expiries hidden by sends */
         || !CU_add_test(pSuite, "xqc_test_effective_pto_count_silent_path",
                         xqc_test_effective_pto_count_silent_path)
