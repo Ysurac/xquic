@@ -6050,7 +6050,6 @@ xqc_conn_destroy_cids(xqc_connection_t *conn)
     xqc_cid_inner_t *cid = NULL;
     xqc_list_head_t *pos, *next;
     xqc_cid_set_inner_t *inner_set = NULL;
-    xqc_list_head_t *pos_set, *next_set;
 
     if (conn->engine->conns_hash) {
         if (xqc_find_conns_hash(conn->engine->conns_hash, conn,
@@ -6068,10 +6067,9 @@ xqc_conn_destroy_cids(xqc_connection_t *conn)
                                       conn->retry_scid.cid_buf, conn->retry_scid.cid_len);
             }
         }
-        xqc_list_for_each_safe(pos_set, next_set, &conn->scid_set.cid_set_list)
+        for (inner_set = xqc_cid_set_first(&conn->scid_set); inner_set != NULL;
+             inner_set = xqc_cid_set_next(&conn->scid_set, inner_set))
         {
-            inner_set = xqc_list_entry(pos_set, xqc_cid_set_inner_t, next);
-
             xqc_list_for_each_safe(pos, next, &inner_set->cid_list)
             {
                 cid = xqc_list_entry(pos, xqc_cid_inner_t, list);
@@ -6084,9 +6082,9 @@ xqc_conn_destroy_cids(xqc_connection_t *conn)
         }
     }
 
-    xqc_list_for_each_safe(pos_set, next_set, &conn->dcid_set.cid_set_list)
+    for (inner_set = xqc_cid_set_first(&conn->dcid_set); inner_set != NULL;
+         inner_set = xqc_cid_set_next(&conn->dcid_set, inner_set))
     {
-        inner_set = xqc_list_entry(pos_set, xqc_cid_set_inner_t, next);
         xqc_list_for_each_safe(pos, next, &inner_set->cid_list)
         {
             cid = xqc_list_entry(pos, xqc_cid_inner_t, list);
@@ -6412,12 +6410,10 @@ xqc_conn_update_user_scid(xqc_connection_t *conn)
     xqc_list_head_t *pos, *next;
 
     xqc_cid_set_inner_t *inner_set;
-    xqc_list_head_t *pos_set, *next_set;
 
-    xqc_list_for_each_safe(pos_set, next_set, &conn->scid_set.cid_set_list)
+    for (inner_set = xqc_cid_set_first(&conn->scid_set); inner_set != NULL;
+         inner_set = xqc_cid_set_next(&conn->scid_set, inner_set))
     {
-        inner_set = xqc_list_entry(pos_set, xqc_cid_set_inner_t, next);
-
         xqc_list_for_each_safe(pos, next, &inner_set->cid_list)
         {
             scid = xqc_list_entry(pos, xqc_cid_inner_t, list);
@@ -8231,7 +8227,6 @@ xqc_conn_handle_stateless_reset(xqc_connection_t *conn, const uint8_t *sr_token)
     xqc_list_head_t *pos, *next;
     xqc_cid_inner_t *cid;
     xqc_cid_set_inner_t *inner_set;
-    xqc_list_head_t *pos_set, *next_set;
 
     if (NULL == conn || NULL == sr_token) {
         return -XQC_EPARAM;
@@ -8243,10 +8238,9 @@ xqc_conn_handle_stateless_reset(xqc_connection_t *conn, const uint8_t *sr_token)
     }
 
     /* compare received stateless reset token with the ones peer sent */
-    xqc_list_for_each_safe(pos_set, next_set, &conn->dcid_set.cid_set_list)
+    for (inner_set = xqc_cid_set_first(&conn->dcid_set); inner_set != NULL;
+         inner_set = xqc_cid_set_next(&conn->dcid_set, inner_set))
     {
-        inner_set = xqc_list_entry(pos_set, xqc_cid_set_inner_t, next);
-
         xqc_list_for_each_safe(pos, next, &inner_set->cid_list)
         {
             cid = xqc_list_entry(pos, xqc_cid_inner_t, list);
