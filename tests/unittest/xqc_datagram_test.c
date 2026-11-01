@@ -287,6 +287,7 @@ xqc_test_datagram_unsent_delay_cap()
 
     conn->conn_flag &= ~XQC_CONN_FLAG_TICKING;
     xqc_engine_destroy(conn->engine);
+}
 
 void
 xqc_test_receive_dgram_at_valid_encryption_level()

@@ -4043,6 +4043,10 @@ xqc_test_h3_recv_body_high_water_close()
     CU_ASSERT(stream->stream_data_in.next_read_offset == total);
     CU_ASSERT(stream->stream_state_recv == XQC_RECV_STREAM_ST_DATA_READ);
 
+    xqc_h3_msgerr_teardown(h3s, h3c, conn);
+}
+
+/*
  * Issue #748 regression test.
  *
  * RFC 9114 4.2 says any request or response containing uppercase
