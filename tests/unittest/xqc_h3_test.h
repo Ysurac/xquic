@@ -97,6 +97,10 @@ void xqc_test_h3_recv_body_high_water_reset();
 void xqc_test_h3_recv_body_high_water_resume_in_engine();
 void xqc_test_h3_recv_body_high_water_close();
 
+/* the h3 connection needs three uni streams (RFC 9114 Section 6.2) */
+void xqc_test_h3_conn_create_three_uni_streams(void);
+void xqc_test_h3_conn_create_fails_without_uni_streams(void);
+
 /* issue #748: RFC 9114 §4.2 uppercase field name rejection */
 void xqc_test_h3_field_name_uppercase_rejection();
 void xqc_test_h3_lowercase_field_name_stream_accepted();
