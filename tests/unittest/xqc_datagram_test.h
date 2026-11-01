@@ -11,4 +11,7 @@ void xqc_test_datagram_frame_path_pinning();
 void xqc_test_datagram_unsent_cap();
 void xqc_test_datagram_unsent_delay_cap();
 
+void xqc_test_receive_dgram_at_valid_encryption_level();
+void xqc_test_reject_dgram_at_invalid_encryption_level();
+
 #endif /* _XQC_DATAGRAM_TEST_H_INCLUDED_ */
