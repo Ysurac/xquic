@@ -2314,6 +2314,24 @@ xqc_path_get_perf_class(xqc_path_ctx_t *path)
     return XQC_PATH_CLASS_STANDBY_HIGH;
 }
 
+/*
+ * The loss rate of one recent-stats window, or 0 when the window holds fewer
+ * than XQC_RECENT_LOSS_MIN_SENT packets. A window lasts 5 srtt, so a quiet
+ * path fills it with a handful of packets, and a PTO probe counts as lost
+ * when it is sent: one probe beside one or two other packets would read as
+ * 33-100% loss and rank a healthy path AVAILABLE_LOW, which lets new data
+ * onto its standby paths and evicts its WLB flows.
+ */
+static double
+xqc_recent_window_loss_rate(unsigned lost_cnt, unsigned send_cnt)
+{
+    if (send_cnt < XQC_RECENT_LOSS_MIN_SENT) {
+        return 0;
+    }
+
+    return 100.0 * lost_cnt / send_cnt;
+}
+
 double
 xqc_conn_recent_loss_rate(xqc_connection_t *conn)
 {
@@ -2332,13 +2350,8 @@ xqc_conn_recent_loss_rate(xqc_connection_t *conn)
         send_cnt1 += path->path_send_ctl->ctl_recent_send_count[1];
     }
 
-    if (send_cnt0) {
-        loss_rate0 = 100.0 * lost_cnt0 / send_cnt0;
-    }
-
-    if (send_cnt1) {
-        loss_rate1 = 100.0 * lost_cnt1 / send_cnt1;
-    }
+    loss_rate0 = xqc_recent_window_loss_rate(lost_cnt0, send_cnt0);
+    loss_rate1 = xqc_recent_window_loss_rate(lost_cnt1, send_cnt1);
 
     return xqc_max(loss_rate0, loss_rate1);
 }
@@ -2346,15 +2359,13 @@ xqc_conn_recent_loss_rate(xqc_connection_t *conn)
 double 
 xqc_path_recent_loss_rate(xqc_path_ctx_t *path)
 {
-    double loss_rate0 = 0, loss_rate1 = 0;
-    
-    if (path->path_send_ctl->ctl_recent_send_count[0]) {
-        loss_rate0 = 100.0 * path->path_send_ctl->ctl_recent_lost_count[0] / path->path_send_ctl->ctl_recent_send_count[0];
-    }
+    xqc_send_ctl_t *send_ctl = path->path_send_ctl;
+    double loss_rate0, loss_rate1;
 
-    if (path->path_send_ctl->ctl_recent_send_count[1]) {
-        loss_rate1 = 100.0 * path->path_send_ctl->ctl_recent_lost_count[1] / path->path_send_ctl->ctl_recent_send_count[1];
-    }
+    loss_rate0 = xqc_recent_window_loss_rate(
+        send_ctl->ctl_recent_lost_count[0], send_ctl->ctl_recent_send_count[0]);
+    loss_rate1 = xqc_recent_window_loss_rate(
+        send_ctl->ctl_recent_lost_count[1], send_ctl->ctl_recent_send_count[1]);
 
     return xqc_max(loss_rate0, loss_rate1);
 }

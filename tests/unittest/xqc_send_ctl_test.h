@@ -81,4 +81,12 @@ void xqc_test_send_ctl_lost_packet_cc_reaction(void);
 void xqc_test_effective_pto_count_silent_path(void);
 void xqc_test_effective_pto_count_bounds(void);
 
+/*
+ * A recent-stats window holding fewer than XQC_RECENT_LOSS_MIN_SENT packets
+ * gives no loss rate, so one PTO probe on a quiet path does not rank it LOW;
+ * a full window still does.
+ */
+void xqc_test_recent_loss_quiet_path_probe(void);
+void xqc_test_recent_loss_min_sent_boundary(void);
+
 #endif

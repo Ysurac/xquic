@@ -1154,3 +1154,78 @@ xqc_test_send_ctl_key_phase_acked_by_sent_packet_only(void)
 
     xqc_engine_destroy(conn->engine);
 }
+
+
+/*
+ * Happy path: a quiet path whose last window held one PTO probe (counted as
+ * lost when sent) beside one other packet, and whose current window holds one
+ * packet, has no recent loss rate and keeps its class. Before the minimum it
+ * read as 50% loss and fell to AVAILABLE_LOW.
+ */
+void
+xqc_test_recent_loss_quiet_path_probe(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+    CU_ASSERT_FATAL(conn->conn_initial_path != NULL);
+
+    xqc_path_ctx_t *path = conn->conn_initial_path;
+    xqc_send_ctl_t *send_ctl = path->path_send_ctl;
+    xqc_test_effective_pto_setup(conn);
+    path->app_path_status = XQC_APP_PATH_STATUS_AVAILABLE;
+
+    send_ctl->ctl_recent_send_count[0] = 1;
+    send_ctl->ctl_recent_lost_count[0] = 0;
+    send_ctl->ctl_recent_send_count[1] = 2;
+    send_ctl->ctl_recent_lost_count[1] = 1;
+
+    CU_ASSERT_EQUAL(xqc_path_recent_loss_rate(path), 0);
+    CU_ASSERT_EQUAL(xqc_conn_recent_loss_rate(conn), 0);
+    CU_ASSERT(xqc_path_get_perf_class(path) != XQC_PATH_CLASS_AVAILABLE_LOW);
+
+    xqc_engine_destroy(conn->engine);
+}
+
+
+/*
+ * Boundary and abnormal path: one packet short of XQC_RECENT_LOSS_MIN_SENT
+ * the window gives no rate; at the minimum, half of it lost reads as 50%
+ * loss and ranks the path AVAILABLE_LOW, from either window.
+ */
+void
+xqc_test_recent_loss_min_sent_boundary(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+    CU_ASSERT_FATAL(conn->conn_initial_path != NULL);
+
+    xqc_path_ctx_t *path = conn->conn_initial_path;
+    xqc_send_ctl_t *send_ctl = path->path_send_ctl;
+    xqc_test_effective_pto_setup(conn);
+    path->app_path_status = XQC_APP_PATH_STATUS_AVAILABLE;
+    CU_ASSERT_FATAL(conn->conn_settings.scheduler_params.loss_percent_thr_high
+                    == 30);
+
+    send_ctl->ctl_recent_send_count[0] = XQC_RECENT_LOSS_MIN_SENT - 1;
+    send_ctl->ctl_recent_lost_count[0] = XQC_RECENT_LOSS_MIN_SENT - 1;
+    CU_ASSERT_EQUAL(xqc_path_recent_loss_rate(path), 0);
+    CU_ASSERT(xqc_path_get_perf_class(path) != XQC_PATH_CLASS_AVAILABLE_LOW);
+
+    send_ctl->ctl_recent_send_count[0] = XQC_RECENT_LOSS_MIN_SENT;
+    send_ctl->ctl_recent_lost_count[0] = XQC_RECENT_LOSS_MIN_SENT / 2;
+    CU_ASSERT_DOUBLE_EQUAL(xqc_path_recent_loss_rate(path), 50.0, 0.001);
+    CU_ASSERT_DOUBLE_EQUAL(xqc_conn_recent_loss_rate(conn), 50.0, 0.001);
+    CU_ASSERT_EQUAL(xqc_path_get_perf_class(path),
+                    XQC_PATH_CLASS_AVAILABLE_LOW);
+
+    /* the previous window counts as well once the current one rotates */
+    send_ctl->ctl_recent_send_count[1] = send_ctl->ctl_recent_send_count[0];
+    send_ctl->ctl_recent_lost_count[1] = send_ctl->ctl_recent_lost_count[0];
+    send_ctl->ctl_recent_send_count[0] = 0;
+    send_ctl->ctl_recent_lost_count[0] = 0;
+    CU_ASSERT_DOUBLE_EQUAL(xqc_path_recent_loss_rate(path), 50.0, 0.001);
+    CU_ASSERT_EQUAL(xqc_path_get_perf_class(path),
+                    XQC_PATH_CLASS_AVAILABLE_LOW);
+
+    xqc_engine_destroy(conn->engine);
+}
