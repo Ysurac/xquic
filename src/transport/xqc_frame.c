@@ -133,12 +133,42 @@ xqc_crypto_frame_header_size(uint64_t offset, size_t length)
     return 1 + xqc_vint_len_by_val(offset) + xqc_vint_len_by_val(length);
 }
 
+/* Append right to left when they are contiguous and the result stays within
+ * XQC_STREAM_FRAME_COALESCE_BYTES. One node then covers many small frames, so
+ * contiguous data cannot exhaust the per-stream node cap (RFC 9000 Section
+ * 21.7). Both frames must be non-empty. Both frames are untouched when it
+ * returns XQC_FALSE. */
+static xqc_bool_t
+xqc_stream_frame_join(xqc_stream_frame_t *left, const xqc_stream_frame_t *right)
+{
+    unsigned char *data;
+
+    if (left->data_length == 0 || right->data_length == 0
+        || left->data_offset + left->data_length != right->data_offset
+        || (uint64_t) left->data_length + right->data_length
+               > XQC_STREAM_FRAME_COALESCE_BYTES)
+    {
+        return XQC_FALSE;
+    }
+
+    data = xqc_realloc(left->data, left->data_length + right->data_length);
+    if (data == NULL) {
+        return XQC_FALSE;
+    }
+
+    memcpy(data + left->data_length, right->data, right->data_length);
+    left->data = data;
+    left->data_length += right->data_length;
+    left->fin |= right->fin;
+    return XQC_TRUE;
+}
+
 xqc_int_t
 xqc_insert_stream_frame(xqc_connection_t *conn, xqc_stream_t *stream,
                         xqc_stream_frame_t *new_frame)
 {
     /* CWE-770 mitigation (RFC 9000 §21.7 stream fragmentation attacks):
-     * bound the buffered out-of-order frame nodes per stream, with one slot
+     * bound the buffered frame nodes per stream, with one slot
      * held in reserve for a frame that extends the contiguous prefix
      * (data_offset <= merged_offset_end < data_offset + data_length).
      *
@@ -189,8 +219,9 @@ xqc_insert_stream_frame(xqc_connection_t *conn, xqc_stream_t *stream,
          * Charging the density budget at count_after keeps the exemption
          * coherent across both tiers. It is reusable but not farmable, and
          * not because a prefix-extender advances merged_offset_end -- that
-         * makes data readable but reclaims nothing; only xqc_stream_recv()
-         * decrements these counters. Two bounds hold with no application
+         * makes data readable but reclaims nothing; besides a join, which only
+         * lowers the node count, only xqc_stream_recv() decrements these
+         * counters. Two bounds hold with no application
          * drain at all. Admission under the density tier requires
          * B + L >= C*m, so after insertion B' >= (C' - 1)*m: the average can
          * sit one reserved node below the minimum and no lower, however many
@@ -223,6 +254,11 @@ xqc_insert_stream_frame(xqc_connection_t *conn, xqc_stream_t *stream,
     unsigned char inserted = 0;
     xqc_list_head_t *pos;
     xqc_stream_frame_t *frame;
+    xqc_stream_frame_t *cur = new_frame;
+    uint64_t new_offset = new_frame->data_offset;
+    unsigned new_len = new_frame->data_length;
+    uint64_t new_end = new_offset + new_len;
+    xqc_bool_t joined = XQC_FALSE;
 
     xqc_list_for_each_reverse(pos, &stream->stream_data_in.frames_tailq)
     {
@@ -256,7 +292,12 @@ xqc_insert_stream_frame(xqc_connection_t *conn, xqc_stream_t *stream,
         }
 
         if (new_frame->data_offset >= frame->data_offset) {
-            xqc_list_add(&new_frame->sf_list, pos);
+            if (xqc_stream_frame_join(frame, new_frame)) {
+                cur = frame;
+                joined = XQC_TRUE;
+            } else {
+                xqc_list_add(&new_frame->sf_list, pos);
+            }
             inserted = 1;
             break;
         }
@@ -273,17 +314,14 @@ xqc_insert_stream_frame(xqc_connection_t *conn, xqc_stream_t *stream,
      *                |--------|
      */
     /* merge */
-    if (stream->stream_data_in.merged_offset_end >= new_frame->data_offset &&
-        stream->stream_data_in.merged_offset_end <
-            new_frame->data_offset + new_frame->data_length) {
-        stream->stream_data_in.merged_offset_end =
-            new_frame->data_offset + new_frame->data_length;
+    if (stream->stream_data_in.merged_offset_end >= new_offset &&
+        stream->stream_data_in.merged_offset_end < new_end) {
+        stream->stream_data_in.merged_offset_end = new_end;
         xqc_log(conn->log, XQC_LOG_DEBUG,
                 "|merge left|merged_offset_end:%ui|new_offset:%ui|new_len:%ud|",
-                stream->stream_data_in.merged_offset_end, new_frame->data_offset,
-                new_frame->data_length);
+                stream->stream_data_in.merged_offset_end, new_offset, new_len);
 
-        pos = new_frame->sf_list.next;
+        pos = cur->sf_list.next;
         xqc_list_for_each_from(pos, &stream->stream_data_in.frames_tailq)
         {
             frame = xqc_list_entry(pos, xqc_stream_frame_t, sf_list);
@@ -303,9 +341,25 @@ xqc_insert_stream_frame(xqc_connection_t *conn, xqc_stream_t *stream,
     }
 
     /* update buffered resource counter */
-    stream->stream_data_in.buffered_frame_count++;
+    if (!joined) {
+        stream->stream_data_in.buffered_frame_count++;
+    }
     stream->stream_data_in.cap_reject_logged = 0;
-    stream->stream_data_in.buffered_data_bytes += new_frame->data_length;
+    stream->stream_data_in.buffered_data_bytes += new_len;
+
+    /* the new data may now touch the next node */
+    if (cur->sf_list.next != &stream->stream_data_in.frames_tailq) {
+        frame = xqc_list_entry(cur->sf_list.next, xqc_stream_frame_t, sf_list);
+        if (xqc_stream_frame_join(cur, frame)) {
+            xqc_list_del(&frame->sf_list);
+            stream->stream_data_in.buffered_frame_count--;
+            xqc_destroy_stream_frame(frame);
+        }
+    }
+
+    if (joined) {
+        xqc_destroy_stream_frame(new_frame);
+    }
 
     return XQC_OK;
 }
@@ -984,6 +1038,10 @@ xqc_process_stream_frame(xqc_connection_t *conn, xqc_packet_in_t *packet_in)
         goto error;
     }
 
+    /* XQC_OK hands the frame to the list (possibly freed): read only these */
+    uint64_t frame_end = stream_frame->data_offset + stream_frame->data_length;
+    unsigned frame_len = stream_frame->data_length;
+
     ret = xqc_insert_stream_frame(conn, stream, stream_frame);
     if (ret == -XQC_EDUP_FRAME) {
         ret = XQC_OK;
@@ -992,19 +1050,17 @@ xqc_process_stream_frame(xqc_connection_t *conn, xqc_packet_in_t *packet_in)
     } else if (ret == -XQC_ELIMIT
                && packet_in->pi_pkt.pkt_type == XQC_PTYPE_SHORT_HEADER)
     {
-        /* Reassembly buffer at capacity (see xqc_insert_stream_frame): this
-         * frame does not extend the contiguous prefix, or the stream is at a
-         * frame cap that also refuses in-order frames until a paused HTTP/3
-         * request resumes. Treat the whole packet as if it were lost instead
-         * of tearing down the connection: returning a tolerant error makes
-         * xqc_conn_process_packet skip xqc_conn_on_pkt_processed, so the
-         * packet is never acknowledged — required by RFC 9000 §13.1 (a
-         * packet must not be acked until its STREAM data has been
-         * enqueued) — and the peer retransmits it later, by which time
-         * the buffer has drained via prefix-extending frames. This is a
-         * §21.7 resource-exhaustion mitigation; the previous escalation
-         * closed healthy multipath connections with a bogus
-         * FRAME_ENCODING_ERROR (generic engine error path) under
+        /* Reassembly buffer at capacity (see xqc_insert_stream_frame): the
+         * frame would take the stream past a frame cap. Treat the whole
+         * packet as if it were lost instead of tearing down the connection:
+         * returning a tolerant error makes xqc_conn_process_packet skip
+         * xqc_conn_on_pkt_processed, so the packet is never acknowledged —
+         * required by RFC 9000 §13.1 (a packet must not be acked until its
+         * STREAM data has been enqueued) — and the peer retransmits it
+         * later, by which time the buffer has drained via prefix-extending
+         * frames. This is a §21.7 resource-exhaustion mitigation; the
+         * previous escalation closed healthy multipath connections with a
+         * bogus FRAME_ENCODING_ERROR (generic engine error path) under
          * cross-path reordering. Restricted to short-header packets: they
          * are always last in a UDP datagram, so the tolerant
          * skip-rest-of-datagram handling cannot drop coalesced follow-up
@@ -1023,14 +1079,11 @@ xqc_process_stream_frame(xqc_connection_t *conn, xqc_packet_in_t *packet_in)
 
     /* receiver flow control */
     xqc_bool_t recved_grew = XQC_FALSE;
-    if (stream->stream_max_recv_offset <
-        stream_frame->data_offset + stream_frame->data_length) {
+    if (stream->stream_max_recv_offset < frame_end) {
         recved_grew = XQC_TRUE;
-        conn->conn_flow_ctl.fc_data_recved += stream_frame->data_offset +
-                                              stream_frame->data_length -
-                                              stream->stream_max_recv_offset;
-        stream->stream_max_recv_offset =
-            stream_frame->data_offset + stream_frame->data_length;
+        conn->conn_flow_ctl.fc_data_recved +=
+            frame_end - stream->stream_max_recv_offset;
+        stream->stream_max_recv_offset = frame_end;
     }
 
     if (conn->conn_flow_ctl.fc_data_recved > conn->conn_flow_ctl.fc_max_data_can_recv) {
@@ -1086,7 +1139,7 @@ xqc_process_stream_frame(xqc_connection_t *conn, xqc_packet_in_t *packet_in)
         xqc_path_metrics_t *sm =
             xqc_stream_path_metrics_get_or_grow(stream, packet_in->pi_path_id);
         if (sm != NULL) {
-            sm->path_recv_effective_bytes += stream_frame->data_length;
+            sm->path_recv_effective_bytes += frame_len;
         }
     }
 
