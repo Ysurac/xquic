@@ -423,6 +423,12 @@ main(int argc, char *argv[])
                         xqc_test_tls_key_update_on_second_path)
         || !CU_add_test(pSuite, "xqc_test_tls_key_update_on_created_path",
                         xqc_test_tls_key_update_on_created_path)
+        || !CU_add_test(pSuite,
+                        "xqc_test_conn_sched_min_srtt_of_active_paths",
+                        xqc_test_conn_sched_min_srtt_of_active_paths)
+        || !CU_add_test(pSuite,
+                        "xqc_test_conn_sched_min_srtt_skips_inactive_paths",
+                        xqc_test_conn_sched_min_srtt_skips_inactive_paths)
         /* RFC 9000 §20.1 CRYPTO_ERROR dynamic construction */
         || !CU_add_test(pSuite, "xqc_test_conn_tls_error_cb_constructs_crypto_error", xqc_test_conn_tls_error_cb_constructs_crypto_error)
         || !CU_add_test(pSuite, "xqc_test_conn_crypto_error_base_value", xqc_test_conn_crypto_error_base_value)

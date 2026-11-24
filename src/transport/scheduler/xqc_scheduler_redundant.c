@@ -116,6 +116,7 @@ xqc_redundant_scheduler_get_path(void *scheduler,
     uint64_t path_srtt = 0;
     xqc_bool_t reached_cwnd_check = XQC_FALSE;
     xqc_bool_t path_can_send = XQC_FALSE;
+    xqc_usec_t min_srtt;
 
     for (path_class = XQC_PATH_CLASS_AVAILABLE_HIGH;
          path_class < XQC_PATH_CLASS_PERF_CLASS_SIZE;
@@ -128,11 +129,15 @@ xqc_redundant_scheduler_get_path(void *scheduler,
         *cc_blocked = XQC_FALSE;
     }
 
+    /* every path is classified against the lowest srtt of the connection's
+     * active paths: compute it once for the packet, not once per path */
+    min_srtt = xqc_conn_get_min_srtt(conn, 0);
+
     /* pass 1: pick the primary path exactly like xqc_minrtt_scheduler */
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
 
-        path_class = xqc_path_get_perf_class(path);
+        path_class = xqc_path_get_perf_class_with_min_srtt(path, min_srtt);
 
         if (path->path_state != XQC_PATH_STATE_ACTIVE
             || path->app_path_status == XQC_APP_PATH_STATUS_FROZEN

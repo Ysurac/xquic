@@ -428,6 +428,14 @@ xqc_path_perf_class_t xqc_path_get_perf_class(xqc_path_ctx_t *path);
 /* fewer packets than this in a recent-stats window give no loss rate */
 #define XQC_RECENT_LOSS_MIN_SENT 10
 
+/*
+ * xqc_path_get_perf_class() with the lowest srtt of the connection's active
+ * paths, xqc_conn_get_min_srtt(conn, 0), given by the caller: a scheduler
+ * that classifies every path for a packet computes it once, not per path.
+ */
+xqc_path_perf_class_t xqc_path_get_perf_class_with_min_srtt(
+    xqc_path_ctx_t *path, xqc_usec_t min_srtt);
+
 double xqc_path_recent_loss_rate(xqc_path_ctx_t *path);
 
 double xqc_conn_recent_loss_rate(xqc_connection_t *conn);

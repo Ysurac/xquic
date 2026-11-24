@@ -39,7 +39,8 @@ xqc_scheduler_standby_decide(const xqc_sched_standby_filter_t *filter,
     if (filter->best_available_class <= XQC_PATH_CLASS_AVAILABLE_MID) {
         return XQC_TRUE;
     }
-    return xqc_path_get_perf_class(path) > filter->best_available_class;
+    return xqc_path_get_perf_class_with_min_srtt(path, filter->min_srtt)
+           > filter->best_available_class;
 }
 
 void
@@ -54,6 +55,7 @@ xqc_scheduler_standby_filter_init(xqc_sched_standby_filter_t *filter,
 
     filter->active = XQC_FALSE;
     filter->best_available_class = XQC_PATH_CLASS_PERF_CLASS_SIZE;
+    filter->min_srtt = 0;
     filter->n_cached = 0;
 
     /* a reinjected copy may ride a standby path */
@@ -78,6 +80,8 @@ xqc_scheduler_standby_filter_init(xqc_sched_standby_filter_t *filter,
         return;
     }
 
+    filter->min_srtt = xqc_conn_get_min_srtt(conn, 0);
+
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
         if (!xqc_scheduler_standby_candidate(path)
@@ -85,7 +89,8 @@ xqc_scheduler_standby_filter_init(xqc_sched_standby_filter_t *filter,
         {
             continue;
         }
-        path_class = xqc_path_get_perf_class(path);
+        path_class = xqc_path_get_perf_class_with_min_srtt(path,
+                                                           filter->min_srtt);
         if (path_class < filter->best_available_class) {
             filter->best_available_class = path_class;
             if (path_class <= XQC_PATH_CLASS_AVAILABLE_MID) {

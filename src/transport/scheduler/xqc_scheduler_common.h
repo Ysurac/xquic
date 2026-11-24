@@ -38,6 +38,8 @@ xqc_bool_t xqc_scheduler_check_path_can_send(xqc_path_ctx_t *path, xqc_packet_ou
 typedef struct xqc_sched_standby_filter_s {
     xqc_bool_t              active;
     xqc_path_perf_class_t   best_available_class;
+    /* xqc_conn_get_min_srtt(conn, 0), for classifying paths */
+    xqc_usec_t              min_srtt;
     /* decisions for the first standby paths, so a scheduler that tests the
      * same path several times per call classifies it once */
     int                     n_cached;
