@@ -124,4 +124,11 @@ void xqc_test_effective_pto_count_bounds(void);
 void xqc_test_recent_loss_quiet_path_probe(void);
 void xqc_test_recent_loss_min_sent_boundary(void);
 
+/*
+ * Loss detection releases a copy acknowledged through its original and a
+ * dropped datagram, and keeps a packet still waiting for its acknowledgment.
+ */
+void xqc_test_send_ctl_indirect_ack_or_drop_releases(void);
+void xqc_test_send_ctl_indirect_ack_or_drop_keeps(void);
+
 #endif
