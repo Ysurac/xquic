@@ -248,6 +248,417 @@ xqc_test_path_validation_timer_not_extended_by_packet(void)
 }
 
 
+/* the queued PATH_CHALLENGE of a path that no acknowledgment covered yet */
+static xqc_packet_out_t *
+xqc_test_path_challenge_unacked(xqc_connection_t *conn, uint64_t path_id)
+{
+    xqc_list_head_t *pos;
+    xqc_packet_out_t *po;
+
+    xqc_list_for_each(pos, &conn->conn_send_queue->sndq_send_packets_high_pri) {
+        po = xqc_list_entry(pos, xqc_packet_out_t, po_list);
+        if ((po->po_frame_types & XQC_FRAME_BIT_PATH_CHALLENGE)
+            && po->po_path_id == path_id && !po->po_acked)
+        {
+            return po;
+        }
+    }
+
+    return NULL;
+}
+
+
+static void
+xqc_test_path_challenge_ack(xqc_send_ctl_t *send_ctl, xqc_packet_out_t *po,
+    xqc_usec_t now)
+{
+    po->po_flag |= XQC_POF_IN_FLIGHT;
+    xqc_send_ctl_on_packet_acked(send_ctl, po, now, 0);
+}
+
+
+/*
+ * RFC 9000 Sections 8.2.2 and 8.2.4: the peer answers a PATH_CHALLENGE with a
+ * single PATH_RESPONSE, so a PATH_CHALLENGE acknowledged while its path is
+ * still validating is followed a PTO later by another one, with a new payload
+ * (Section 13.3), and after a doubled interval when that one is acknowledged
+ * unanswered too, until a PATH_RESPONSE validates the path.
+ */
+void
+xqc_test_path_challenge_resent_after_unanswered_ack(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+
+    conn->enable_multipath = XQC_TRUE;
+    conn->remote_settings.max_ack_delay = 25;
+
+    xqc_path_ctx_t *path = xqc_test_path_validation_create_path(conn);
+    CU_ASSERT_FATAL(path != NULL);
+    xqc_list_add_tail(&path->path_list, &conn->conn_paths_list);
+    CU_ASSERT_FATAL(xqc_path_init(path, conn) == XQC_OK);
+    CU_ASSERT_EQUAL(path->path_state, XQC_PATH_STATE_VALIDATING);
+
+    xqc_send_ctl_t *send_ctl = path->path_send_ctl;
+    xqc_timer_t *timer = &send_ctl->path_timer_manager
+                          .timer[XQC_TIMER_PATH_CHALLENGE];
+    xqc_packet_out_t *challenge = xqc_test_path_challenge_unacked(conn, 1);
+    CU_ASSERT_FATAL(challenge != NULL);
+    CU_ASSERT(!timer->timer_is_set);
+
+    /* the acknowledgment gave the path its first RTT sample */
+    send_ctl->ctl_srtt = 10000;
+    send_ctl->ctl_rttvar = 5000;
+    xqc_usec_t pto = 10000 + 4 * 5000 + 25 * 1000;
+
+    xqc_usec_t now = xqc_monotonic_timestamp();
+    xqc_test_path_challenge_ack(send_ctl, challenge, now);
+    CU_ASSERT(timer->timer_is_set);
+    CU_ASSERT_EQUAL(timer->expire_time, now + pto);
+    CU_ASSERT(xqc_test_path_challenge_unacked(conn, 1) == NULL);
+
+    /* the acknowledgment of a copy of it leaves the timer alone */
+    xqc_test_path_challenge_ack(send_ctl, challenge, now + 1000);
+    CU_ASSERT_EQUAL(timer->expire_time, now + pto);
+
+    /* a PTO later, a PATH_CHALLENGE with a new payload is sent */
+    unsigned char first_data[XQC_PATH_CHALLENGE_DATA_LEN];
+    memcpy(first_data, path->path_challenge_data, sizeof(first_data));
+    timer->timeout_cb(XQC_TIMER_PATH_CHALLENGE, timer->expire_time,
+                      timer->user_data);
+    xqc_timer_unset(&send_ctl->path_timer_manager, XQC_TIMER_PATH_CHALLENGE);
+    CU_ASSERT_EQUAL(path->path_challenge_resends, 1);
+    challenge = xqc_test_path_challenge_unacked(conn, 1);
+    CU_ASSERT_FATAL(challenge != NULL);
+    CU_ASSERT_FATAL(challenge->po_payload != NULL);
+    CU_ASSERT_EQUAL(challenge->po_payload[0], 0x1a);
+    CU_ASSERT(memcmp(challenge->po_payload + 1, path->path_challenge_data,
+                     XQC_PATH_CHALLENGE_DATA_LEN) == 0);
+    CU_ASSERT(memcmp(first_data, path->path_challenge_data,
+                     XQC_PATH_CHALLENGE_DATA_LEN) != 0);
+
+    /* acknowledged unanswered again: the interval doubles */
+    now = xqc_monotonic_timestamp();
+    xqc_test_path_challenge_ack(send_ctl, challenge, now);
+    CU_ASSERT(timer->timer_is_set);
+    CU_ASSERT_EQUAL(timer->expire_time, now + 2 * pto);
+
+    /* a PATH_RESPONSE validates the path and stops the challenges */
+    xqc_path_validate(path);
+    CU_ASSERT_EQUAL(path->path_state, XQC_PATH_STATE_ACTIVE);
+    CU_ASSERT(!timer->timer_is_set);
+
+    xqc_list_del_init(&path->path_list);
+    xqc_test_path_validation_destroy_path(path);
+    xqc_engine_destroy(conn->engine);
+}
+
+
+/*
+ * A PATH_CHALLENGE is not sent again once a PATH_RESPONSE validated its path,
+ * when its acknowledgment comes after that response, nor while the path or
+ * the connection is closing.
+ */
+void
+xqc_test_path_challenge_not_resent_once_answered(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+
+    conn->enable_multipath = XQC_TRUE;
+
+    xqc_path_ctx_t *path = xqc_test_path_validation_create_path(conn);
+    CU_ASSERT_FATAL(path != NULL);
+    xqc_list_add_tail(&path->path_list, &conn->conn_paths_list);
+    CU_ASSERT_FATAL(xqc_path_init(path, conn) == XQC_OK);
+
+    xqc_send_ctl_t *send_ctl = path->path_send_ctl;
+    xqc_timer_t *timer = &send_ctl->path_timer_manager
+                          .timer[XQC_TIMER_PATH_CHALLENGE];
+    xqc_packet_out_t *challenge = xqc_test_path_challenge_unacked(conn, 1);
+    CU_ASSERT_FATAL(challenge != NULL);
+    xqc_usec_t now = xqc_monotonic_timestamp();
+
+    /* the connection closes while the path validates */
+    xqc_test_path_challenge_ack(send_ctl, challenge, now);
+    CU_ASSERT(timer->timer_is_set);
+    xqc_conn_state_t state = conn->conn_state;
+    conn->conn_state = XQC_CONN_STATE_CLOSING;
+    timer->timeout_cb(XQC_TIMER_PATH_CHALLENGE, timer->expire_time,
+                      timer->user_data);
+    xqc_timer_unset(&send_ctl->path_timer_manager, XQC_TIMER_PATH_CHALLENGE);
+    conn->conn_state = state;
+    CU_ASSERT(xqc_test_path_challenge_unacked(conn, 1) == NULL);
+    CU_ASSERT_EQUAL(path->path_challenge_resends, 0);
+
+    /* the PATH_RESPONSE arrives before a late acknowledgment */
+    xqc_path_resend_challenge(path);
+    challenge = xqc_test_path_challenge_unacked(conn, 1);
+    CU_ASSERT_FATAL(challenge != NULL);
+    xqc_path_validate(path);
+    xqc_test_path_challenge_ack(send_ctl, challenge, now);
+    CU_ASSERT(!timer->timer_is_set);
+
+    /* a timer armed before the validation sends nothing */
+    xqc_path_resend_challenge(path);
+    CU_ASSERT(xqc_test_path_challenge_unacked(conn, 1) == NULL);
+    CU_ASSERT_EQUAL(path->path_challenge_resends, 1);
+
+    /* a path abandoned while validating is not challenged again */
+    path->path_state = XQC_PATH_STATE_CLOSING;
+    xqc_path_on_challenge_acked(path, now);
+    CU_ASSERT(!timer->timer_is_set);
+    xqc_path_resend_challenge(path);
+    CU_ASSERT(xqc_test_path_challenge_unacked(conn, 1) == NULL);
+
+    xqc_list_del_init(&path->path_list);
+    xqc_test_path_validation_destroy_path(path);
+    xqc_engine_destroy(conn->engine);
+}
+
+
+/* path 1 of a connection, validating, its first PATH_CHALLENGE queued */
+static xqc_path_ctx_t *
+xqc_test_path_challenge_validating_path(xqc_connection_t *conn)
+{
+    xqc_path_ctx_t *path;
+
+    conn->enable_multipath = XQC_TRUE;
+    conn->remote_settings.max_ack_delay = 25;
+
+    path = xqc_test_path_validation_create_path(conn);
+    if (path == NULL) {
+        return NULL;
+    }
+
+    xqc_list_add_tail(&path->path_list, &conn->conn_paths_list);
+    if (xqc_path_init(path, conn) != XQC_OK) {
+        xqc_list_del_init(&path->path_list);
+        xqc_test_path_validation_destroy_path(path);
+        return NULL;
+    }
+
+    return path;
+}
+
+
+static void
+xqc_test_path_challenge_destroy(xqc_connection_t *conn, xqc_path_ctx_t *path)
+{
+    xqc_list_del_init(&path->path_list);
+    xqc_test_path_validation_destroy_path(path);
+    xqc_engine_destroy(conn->engine);
+}
+
+
+/* a PATH_RESPONSE frame echoing data, received on path 1 */
+static xqc_int_t
+xqc_test_path_response_recv(xqc_connection_t *conn, const unsigned char *data)
+{
+    unsigned char frame[1 + XQC_PATH_CHALLENGE_DATA_LEN];
+    xqc_packet_in_t packet_in;
+
+    frame[0] = 0x1b;
+    memcpy(frame + 1, data, XQC_PATH_CHALLENGE_DATA_LEN);
+
+    memset(&packet_in, 0, sizeof(packet_in));
+    packet_in.pi_pkt.pkt_type = XQC_PTYPE_SHORT_HEADER;
+    packet_in.pi_path_id = 1;
+    packet_in.pos = frame;
+    packet_in.last = frame + sizeof(frame);
+
+    return xqc_process_path_response_frame(conn, &packet_in);
+}
+
+
+/*
+ * Path 1 sends n PATH_CHALLENGE frames after its first one, each once the
+ * previous one was acknowledged without a PATH_RESPONSE. data[i] receives the
+ * payload of PATH_CHALLENGE i, 0 being the first one.
+ */
+static void
+xqc_test_path_challenge_resend_unanswered(xqc_connection_t *conn,
+    xqc_path_ctx_t *path, uint32_t n,
+    unsigned char data[][XQC_PATH_CHALLENGE_DATA_LEN])
+{
+    xqc_send_ctl_t *send_ctl = path->path_send_ctl;
+    xqc_timer_t *timer = &send_ctl->path_timer_manager
+                          .timer[XQC_TIMER_PATH_CHALLENGE];
+    xqc_packet_out_t *challenge;
+    uint32_t i;
+
+    memcpy(data[0], path->path_challenge_data, XQC_PATH_CHALLENGE_DATA_LEN);
+    for (i = 1; i <= n; i++) {
+        challenge = xqc_test_path_challenge_unacked(conn, 1);
+        CU_ASSERT_FATAL(challenge != NULL);
+        xqc_test_path_challenge_ack(send_ctl, challenge,
+                                    xqc_monotonic_timestamp());
+        CU_ASSERT_FATAL(timer->timer_is_set);
+        timer->timeout_cb(XQC_TIMER_PATH_CHALLENGE, timer->expire_time,
+                          timer->user_data);
+        xqc_timer_unset(&send_ctl->path_timer_manager,
+                        XQC_TIMER_PATH_CHALLENGE);
+        CU_ASSERT_FATAL(path->path_challenge_resends == i);
+        memcpy(data[i], path->path_challenge_data,
+               XQC_PATH_CHALLENGE_DATA_LEN);
+    }
+}
+
+
+/*
+ * A copy of a PATH_CHALLENGE packet, still in flight when the packet was
+ * acknowledged, is acknowledged through it later, by loss detection, a PTO
+ * probe or a closing path (xqc_send_ctl_indirectly_ack_or_drop_po()), which
+ * pass no time. After the next PATH_CHALLENGE, that arms the timer a doubled
+ * PTO from now, and no PATH_CHALLENGE is sent at once.
+ */
+void
+xqc_test_path_challenge_not_resent_at_once(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+    xqc_path_ctx_t *path = xqc_test_path_challenge_validating_path(conn);
+    CU_ASSERT_FATAL(path != NULL);
+
+    xqc_send_ctl_t *send_ctl = path->path_send_ctl;
+    xqc_timer_manager_t *timers = &send_ctl->path_timer_manager;
+    xqc_timer_t *timer = &timers->timer[XQC_TIMER_PATH_CHALLENGE];
+    xqc_packet_out_t *challenge = xqc_test_path_challenge_unacked(conn, 1);
+    CU_ASSERT_FATAL(challenge != NULL);
+
+    /* a PTO probe copies the PATH_CHALLENGE, and the copy is sent */
+    xqc_send_queue_copy_to_probe(challenge, conn->conn_send_queue, path);
+    xqc_packet_out_t *copy = xqc_list_entry(
+        conn->conn_send_queue->sndq_pto_probe_packets.prev,
+        xqc_packet_out_t, po_list);
+    CU_ASSERT_FATAL(copy->po_origin == challenge);
+    copy->po_flag |= XQC_POF_IN_FLIGHT;
+
+    /* the PATH_CHALLENGE is acknowledged unanswered and sent again */
+    xqc_test_path_challenge_ack(send_ctl, challenge,
+                                xqc_monotonic_timestamp());
+    CU_ASSERT_FATAL(timer->timer_is_set);
+    xqc_timer_expire(timers, timer->expire_time);
+    CU_ASSERT_EQUAL(path->path_challenge_resends, 1);
+    CU_ASSERT(!timer->timer_is_set);
+
+    /* then the copy is acknowledged through it */
+    xqc_usec_t now = xqc_monotonic_timestamp();
+    xqc_usec_t interval = xqc_send_ctl_calc_pto(send_ctl) << 1;
+    CU_ASSERT(xqc_send_ctl_indirectly_ack_or_drop_po(conn, copy));
+    CU_ASSERT(timer->timer_is_set);
+    CU_ASSERT(timer->expire_time >= now + interval);
+
+    xqc_timer_expire(timers, xqc_monotonic_timestamp());
+    CU_ASSERT_EQUAL(path->path_challenge_resends, 1);
+
+    xqc_test_path_challenge_destroy(conn, path);
+}
+
+
+/*
+ * RFC 9000 Section 8.2.3: a PATH_RESPONSE echoing an earlier PATH_CHALLENGE
+ * of the validation, delayed past the next ones, validates the path until
+ * more than XQC_PATH_CHALLENGE_PREV_N were sent after it. One echoing data
+ * that no PATH_CHALLENGE carried does not.
+ */
+void
+xqc_test_path_challenge_earlier_response_validates(void)
+{
+    unsigned char data[XQC_PATH_CHALLENGE_PREV_N + 2]
+                      [XQC_PATH_CHALLENGE_DATA_LEN];
+    unsigned char other[XQC_PATH_CHALLENGE_DATA_LEN];
+    xqc_connection_t *conn;
+    xqc_path_ctx_t *path;
+    int answered;
+
+    /* the response to the first or the second of three PATH_CHALLENGEs */
+    for (answered = 0; answered < 2; answered++) {
+        conn = test_engine_connect();
+        CU_ASSERT_FATAL(conn != NULL);
+        path = xqc_test_path_challenge_validating_path(conn);
+        CU_ASSERT_FATAL(path != NULL);
+        xqc_test_path_challenge_resend_unanswered(conn, path, 2, data);
+
+        memcpy(other, data[answered], sizeof(other));
+        other[0] ^= 0xff;
+        CU_ASSERT_EQUAL(xqc_test_path_response_recv(conn, other), XQC_OK);
+        CU_ASSERT_EQUAL(path->path_state, XQC_PATH_STATE_VALIDATING);
+
+        CU_ASSERT_EQUAL(xqc_test_path_response_recv(conn, data[answered]),
+                        XQC_OK);
+        CU_ASSERT_EQUAL(path->path_state, XQC_PATH_STATE_ACTIVE);
+        xqc_test_path_challenge_destroy(conn, path);
+    }
+
+    /*
+     * XQC_PATH_CHALLENGE_PREV_N + 1 PATH_CHALLENGEs after the first one, the
+     * first one no longer matches, and each later one does
+     */
+    for (answered = 1; answered <= XQC_PATH_CHALLENGE_PREV_N + 1; answered++) {
+        conn = test_engine_connect();
+        CU_ASSERT_FATAL(conn != NULL);
+        path = xqc_test_path_challenge_validating_path(conn);
+        CU_ASSERT_FATAL(path != NULL);
+        xqc_test_path_challenge_resend_unanswered(conn, path,
+                                                  XQC_PATH_CHALLENGE_PREV_N + 1,
+                                                  data);
+
+        CU_ASSERT_EQUAL(xqc_test_path_response_recv(conn, data[0]), XQC_OK);
+        CU_ASSERT_EQUAL(path->path_state, XQC_PATH_STATE_VALIDATING);
+
+        CU_ASSERT_EQUAL(xqc_test_path_response_recv(conn, data[answered]),
+                        XQC_OK);
+        CU_ASSERT_EQUAL(path->path_state, XQC_PATH_STATE_ACTIVE);
+        xqc_test_path_challenge_destroy(conn, path);
+    }
+}
+
+
+/*
+ * A PATH_CHALLENGE that cannot be written leaves the payload of the last one
+ * sent, whose PATH_RESPONSE still validates the path.
+ */
+void
+xqc_test_path_challenge_write_error_keeps_payload(void)
+{
+    unsigned char sent[XQC_PATH_CHALLENGE_DATA_LEN];
+
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+    xqc_path_ctx_t *path = xqc_test_path_challenge_validating_path(conn);
+    CU_ASSERT_FATAL(path != NULL);
+
+    xqc_send_ctl_t *send_ctl = path->path_send_ctl;
+    xqc_timer_t *timer = &send_ctl->path_timer_manager
+                          .timer[XQC_TIMER_PATH_CHALLENGE];
+    xqc_packet_out_t *challenge = xqc_test_path_challenge_unacked(conn, 1);
+    CU_ASSERT_FATAL(challenge != NULL);
+    memcpy(sent, path->path_challenge_data, sizeof(sent));
+
+    xqc_test_path_challenge_ack(send_ctl, challenge,
+                                xqc_monotonic_timestamp());
+    CU_ASSERT_FATAL(timer->timer_is_set);
+
+    /* packet header construction fails when the timer fires */
+    size_t pkt_out_size = conn->pkt_out_size;
+    conn->pkt_out_size = 0;
+    timer->timeout_cb(XQC_TIMER_PATH_CHALLENGE, timer->expire_time,
+                      timer->user_data);
+    xqc_timer_unset(&send_ctl->path_timer_manager, XQC_TIMER_PATH_CHALLENGE);
+    conn->pkt_out_size = pkt_out_size;
+
+    CU_ASSERT(xqc_test_path_challenge_unacked(conn, 1) == NULL);
+    CU_ASSERT_EQUAL(path->path_challenge_resends, 0);
+    CU_ASSERT(memcmp(path->path_challenge_data, sent, sizeof(sent)) == 0);
+
+    CU_ASSERT_EQUAL(xqc_test_path_response_recv(conn, sent), XQC_OK);
+    CU_ASSERT_EQUAL(path->path_state, XQC_PATH_STATE_ACTIVE);
+
+    xqc_test_path_challenge_destroy(conn, path);
+}
+
+
 typedef struct xqc_rtt_case_s {
     const char     *name;
     xqc_bool_t      hsk_confirmed;
@@ -702,23 +1113,25 @@ xqc_test_send_ctl_granularity_defers_before_boundary(void)
 
 
 /*
- * Build a send_ctl state that satisfies xqc_send_ctl_in_persistent_congestion:
- *   - pto_count == XQC_CONSECUTIVE_PTO_THRESH
+ * Build a send_ctl state in which packets lost over a long enough period
+ * establish persistent congestion (RFC 9002 7.6.2):
+ *   - an RTT sample and a confirmed handshake at 1 us, before our packets
  *   - srtt/rttvar small so duration is bounded and easy to exceed
- *   - first_rtt_sample_time non-zero so detect_lost doesn't early-return
- *   - largest_acked[APP_DATA] >= our packet's pkt_num so the loop considers it
+ *   - largest_acked[APP_DATA] >= our packets' pkt_num so the loop
+ *     considers them
  */
 static void
 xqc_test_send_ctl_arm_pc_state(xqc_send_ctl_t *send_ctl,
     xqc_usec_t srtt, xqc_usec_t rttvar, xqc_usec_t minrtt,
     xqc_packet_number_t largest_acked)
 {
+    send_ctl->ctl_conn->conn_flag |= XQC_CONN_FLAG_HANDSHAKE_CONFIRMED;
+    send_ctl->ctl_conn->handshake_confirmed_time = 1;
     send_ctl->ctl_srtt    = srtt;
     send_ctl->ctl_rttvar  = rttvar;
     send_ctl->ctl_minrtt  = minrtt;
     send_ctl->ctl_latest_rtt = srtt;
     send_ctl->ctl_first_rtt_sample_time = 1;
-    send_ctl->ctl_pto_count = XQC_CONSECUTIVE_PTO_THRESH;
     send_ctl->ctl_largest_acked[XQC_PNS_APP_DATA] = largest_acked;
 }
 
@@ -743,17 +1156,18 @@ xqc_test_send_ctl_persistent_congestion_resets_rtt(void)
 
     /* Pin RTT estimator at a small, converged value. With srtt=10ms,
      * rttvar=2ms, max_ack_delay=25ms, the persistent-congestion
-     * duration is (10 + max(8,2) + 25)ms * 3 = 129ms. Setting
-     * po_sent_time = 1us and now = 1s leaves a 999ms gap, well past
-     * the 129ms threshold. */
+     * duration is (10 + max(8,2) + 25)ms * 3 = 129ms. Two packets
+     * sent 200ms apart and lost, with none acknowledged in between,
+     * go well past the 129ms threshold. */
     xqc_test_send_ctl_arm_pc_state(send_ctl,
                                    /* srtt   */ 10000,
                                    /* rttvar */  2000,
                                    /* minrtt */  8000,
-                                   /* largest_acked */ 1);
+                                   /* largest_acked */ 2);
 
-    xqc_packet_out_t *po = xqc_test_send_ctl_seed_lost_packet(conn, 1, 1);
-    CU_ASSERT_FATAL(po != NULL);
+    CU_ASSERT_FATAL(xqc_test_send_ctl_seed_lost_packet(conn, 1, 2) != NULL);
+    CU_ASSERT_FATAL(xqc_test_send_ctl_seed_lost_packet(conn, 2, 200002)
+                    != NULL);
 
     uint64_t cwnd_before = send_ctl->ctl_cong_callback->xqc_cong_ctl_get_cwnd(
         send_ctl->ctl_cong);
@@ -796,9 +1210,10 @@ xqc_test_send_ctl_persistent_congestion_rtt_reseeds_from_new_sample(void)
 
     /* Drive the persistent-congestion path identically to Test A so the
      * state on entry to update_rtt is exactly what the fix produces. */
-    xqc_test_send_ctl_arm_pc_state(send_ctl, 10000, 2000, 8000, 1);
-    xqc_packet_out_t *po = xqc_test_send_ctl_seed_lost_packet(conn, 1, 1);
-    CU_ASSERT_FATAL(po != NULL);
+    xqc_test_send_ctl_arm_pc_state(send_ctl, 10000, 2000, 8000, 2);
+    CU_ASSERT_FATAL(xqc_test_send_ctl_seed_lost_packet(conn, 1, 2) != NULL);
+    CU_ASSERT_FATAL(xqc_test_send_ctl_seed_lost_packet(conn, 2, 200002)
+                    != NULL);
     xqc_send_ctl_detect_lost(send_ctl, conn->conn_send_queue,
                              XQC_PNS_APP_DATA, 1000000);
 
@@ -833,14 +1248,16 @@ xqc_test_send_ctl_single_loss_does_not_reset_rtt(void)
     CU_ASSERT_FATAL(send_ctl != NULL);
     conn->remote_settings.max_ack_delay = 25;
 
-    /* Same RTT state and same packet timing as Test A, but pto_count
-     * is below XQC_CONSECUTIVE_PTO_THRESH so the persistent-congestion
-     * predicate fails. The packet is still marked lost (single loss),
-     * but the RTT estimator must remain untouched. */
+    /* Same RTT state as Test A, and two PTOs, but a single packet
+     * lost, sent ~1s before the loss is detected: persistent
+     * congestion takes two lost packets (RFC 9002 7.6.2), whatever
+     * the time since the last one was sent or the PTO count. The
+     * packet is still marked lost (single loss), but the RTT estimator
+     * must remain untouched. */
     xqc_test_send_ctl_arm_pc_state(send_ctl, 10000, 2000, 8000, 1);
-    send_ctl->ctl_pto_count = 0;
+    send_ctl->ctl_pto_count = 2;
 
-    xqc_packet_out_t *po = xqc_test_send_ctl_seed_lost_packet(conn, 1, 1);
+    xqc_packet_out_t *po = xqc_test_send_ctl_seed_lost_packet(conn, 1, 2);
     CU_ASSERT_FATAL(po != NULL);
 
     xqc_send_ctl_detect_lost(send_ctl, conn->conn_send_queue,
@@ -872,11 +1289,12 @@ xqc_test_send_ctl_persistent_congestion_no_rtt_sample_early_return(void)
      * OnPacketsLost block returns before the persistent-congestion
      * branch can fire. This pins existing behavior: the fix must not
      * change what happens before RTT has been measured. */
-    xqc_test_send_ctl_arm_pc_state(send_ctl, 10000, 2000, 8000, 1);
+    xqc_test_send_ctl_arm_pc_state(send_ctl, 10000, 2000, 8000, 2);
     send_ctl->ctl_first_rtt_sample_time = 0;
 
-    xqc_packet_out_t *po = xqc_test_send_ctl_seed_lost_packet(conn, 1, 1);
-    CU_ASSERT_FATAL(po != NULL);
+    CU_ASSERT_FATAL(xqc_test_send_ctl_seed_lost_packet(conn, 1, 2) != NULL);
+    CU_ASSERT_FATAL(xqc_test_send_ctl_seed_lost_packet(conn, 2, 200002)
+                    != NULL);
 
     xqc_send_ctl_detect_lost(send_ctl, conn->conn_send_queue,
                              XQC_PNS_APP_DATA, 1000000);
@@ -886,6 +1304,560 @@ xqc_test_send_ctl_persistent_congestion_no_rtt_sample_early_return(void)
     CU_ASSERT_EQUAL(send_ctl->ctl_rttvar,  2000);
     CU_ASSERT_EQUAL(send_ctl->ctl_minrtt,  8000);
     CU_ASSERT_EQUAL(send_ctl->ctl_first_rtt_sample_time, 0);
+
+    xqc_engine_destroy(conn->engine);
+}
+
+
+/*
+ * RFC 9002 7.6.2: persistent congestion takes two lost ack-eliciting
+ * packets sent after an RTT sample, with no packet acknowledged in
+ * between, over longer than the duration of 7.6.1. Most tests below drive
+ * the example of RFC 9002 7.6.3 through the peer's ACKs, one time unit
+ * being 10 ms: srtt 10 ms, rttvar 1 ms and the peer's max_ack_delay 6 ms
+ * give 10 + 4 + 6 = 20 ms, and a duration of 60 ms. The handshake is
+ * confirmed and the RTT sampled before t0.
+ */
+#define XQC_TEST_PC_T0          1000000
+
+/* ms milliseconds after t0 */
+#define xqc_test_pc_ms(ms)      (XQC_TEST_PC_T0 + (xqc_usec_t) (ms) * 1000)
+
+static void
+xqc_test_pc_setup(xqc_path_ctx_t *path)
+{
+    xqc_connection_t *conn = path->parent_conn;
+    xqc_send_ctl_t *send_ctl = path->path_send_ctl;
+
+    conn->conn_flag |= XQC_CONN_FLAG_HANDSHAKE_CONFIRMED;
+    conn->handshake_confirmed_time = XQC_TEST_PC_T0 - 2;
+    conn->remote_settings.max_ack_delay = 6;
+    send_ctl->ctl_srtt = 10000;
+    send_ctl->ctl_rttvar = 1000;
+    send_ctl->ctl_minrtt = 10000;
+    send_ctl->ctl_latest_rtt = 10000;
+    send_ctl->ctl_first_rtt_sample_time = XQC_TEST_PC_T0 - 1;
+}
+
+
+/* an ack-eliciting packet sent on the path ms milliseconds after t0 */
+static void
+xqc_test_pc_send(xqc_path_ctx_t *path, xqc_packet_number_t pkt_num,
+    xqc_usec_t ms)
+{
+    xqc_connection_t *conn = path->parent_conn;
+    xqc_send_queue_t *sq = conn->conn_send_queue;
+    xqc_packet_out_t *po = xqc_packet_out_get(sq);
+
+    CU_ASSERT_FATAL(po != NULL);
+    po->po_pkt.pkt_type = XQC_PTYPE_SHORT_HEADER;
+    po->po_pkt.pkt_pns  = XQC_PNS_APP_DATA;
+    po->po_pkt.pkt_num  = pkt_num;
+    po->po_path_id      = path->path_id;
+    po->po_sent_time    = xqc_test_pc_ms(ms);
+    po->po_frame_types  = XQC_FRAME_BIT_PING;
+    po->po_used_size    = 100;
+
+    xqc_send_queue_insert_unacked(po,
+        &sq->sndq_unacked_packets[XQC_PNS_APP_DATA], sq);
+    xqc_send_ctl_increase_inflight(conn, po);
+    path->path_pn_ctl->ctl_largest_sent[XQC_PNS_APP_DATA] = pkt_num;
+}
+
+
+/*
+ * The peer acknowledges the ranges, highest first, ms milliseconds after
+ * t0. They give no RTT sample, as if they came on another path, so that
+ * the duration stays 60 ms.
+ */
+static void
+xqc_test_pc_ack(xqc_path_ctx_t *path, xqc_usec_t ms,
+    const xqc_pktno_range_t *ranges, unsigned n_ranges)
+{
+    xqc_ack_info_t ack_info;
+
+    memset(&ack_info, 0, sizeof(ack_info));
+    ack_info.pns = XQC_PNS_APP_DATA;
+    ack_info.path_id = path->path_id;
+    ack_info.n_ranges = n_ranges;
+    memcpy(ack_info.ranges, ranges, n_ranges * sizeof(ranges[0]));
+    ack_info.largest_acked = ranges[0].high;
+
+    CU_ASSERT_EQUAL(xqc_send_ctl_on_ack_received(path->path_send_ctl,
+                        path->path_pn_ctl, path->parent_conn->conn_send_queue,
+                        &ack_info, xqc_test_pc_ms(ms), XQC_FALSE),
+                    XQC_OK);
+}
+
+
+/* persistent congestion resets the RTT estimator of the path */
+static xqc_bool_t
+xqc_test_pc_declared(xqc_path_ctx_t *path)
+{
+    return path->path_send_ctl->ctl_first_rtt_sample_time == 0
+           && path->path_send_ctl->ctl_srtt
+              == path->parent_conn->conn_settings.initial_rtt;
+}
+
+
+/*
+ * Table 1 of RFC 9002 7.6.3 on the path: packet 1 acknowledged at 12 ms,
+ * packets 2 to 7 every 10 ms, 8 at 80 ms and 9 at 120 ms (PTOs 1 and 2),
+ * then the ACK of packet 9, and of packet 5 too if ack_5, at ack_ms. The
+ * packets in between are declared lost; whether that establishes
+ * persistent congestion is returned.
+ */
+static xqc_bool_t
+xqc_test_pc_example(xqc_path_ctx_t *path, xqc_usec_t ack_ms,
+    xqc_bool_t ack_5)
+{
+    xqc_connection_t *conn = path->parent_conn;
+    xqc_pktno_range_t ack_1[] = {{.low = 1, .high = 1}};
+    xqc_pktno_range_t ack_9[] = {{.low = 9, .high = 9},
+                                 {.low = 5, .high = 5}};
+    uint64_t lost = conn->detected_loss_cnt;
+
+    xqc_test_pc_send(path, 1, 0);
+    xqc_test_pc_send(path, 2, 10);
+    xqc_test_pc_ack(path, 12, ack_1, 1);
+    for (xqc_packet_number_t pn = 3; pn <= 7; pn++) {
+        xqc_test_pc_send(path, pn, (pn - 1) * 10);
+    }
+    xqc_test_pc_send(path, 8, 80);
+    xqc_test_pc_send(path, 9, 120);
+    path->path_send_ctl->ctl_pto_count = 2;
+
+    xqc_test_pc_ack(path, ack_ms, ack_9, ack_5 ? 2 : 1);
+    CU_ASSERT_EQUAL(conn->detected_loss_cnt, lost + (ack_5 ? 6 : 7));
+
+    return xqc_test_pc_declared(path);
+}
+
+
+/*
+ * Happy path, as in RFC 9002 7.6.3: packets 2 to 8, sent over 70 ms, are
+ * declared lost by the ACK of packet 9, with none acknowledged in between.
+ * The ACK comes 2 ms after packet 9 was sent: the time since packet 8 was
+ * sent, 42 ms, plays no role.
+ */
+void
+xqc_test_send_ctl_pc_rfc9002_example(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+    xqc_path_ctx_t *path = conn->conn_initial_path;
+    xqc_send_ctl_t *send_ctl = path->path_send_ctl;
+
+    xqc_test_pc_setup(path);
+
+    /* the period must exceed the duration */
+    CU_ASSERT(!xqc_send_ctl_in_persistent_congestion(send_ctl, 60000));
+    CU_ASSERT(xqc_send_ctl_in_persistent_congestion(send_ctl, 60001));
+
+    CU_ASSERT(xqc_test_pc_example(path, 122, XQC_FALSE));
+    CU_ASSERT_EQUAL(send_ctl->ctl_minrtt, XQC_MAX_UINT32_VALUE);
+    CU_ASSERT_EQUAL(send_ctl->ctl_rttvar,
+                    conn->conn_settings.initial_rtt / 2);
+
+    xqc_engine_destroy(conn->engine);
+}
+
+
+/*
+ * RFC 9002 7.6.2: "none of the packets sent between the send times of
+ * these two packets are acknowledged". The ACK of packet 9 comes at 150 ms,
+ * 70 ms after packet 8 was sent, but a packet sent at 40 ms was
+ * acknowledged: the lost packets make two periods, of 20 and 30 ms. The
+ * acknowledged packet is packet 5, acknowledged with packet 9, or an
+ * ACK-only packet, acknowledged on its own and no longer reported with
+ * packet 9.
+ */
+void
+xqc_test_send_ctl_pc_acked_in_between(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+    xqc_path_ctx_t *path = conn->conn_initial_path;
+
+    xqc_test_pc_setup(path);
+    CU_ASSERT(!xqc_test_pc_example(path, 150, XQC_TRUE));
+    CU_ASSERT_EQUAL(path->path_send_ctl->ctl_srtt, 10000);
+    xqc_engine_destroy(conn->engine);
+
+    conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+    path = conn->conn_initial_path;
+    xqc_test_pc_setup(path);
+
+    xqc_pktno_range_t ack_1[] = {{.low = 1, .high = 1}};
+    xqc_pktno_range_t ack_5[] = {{.low = 5, .high = 5}};
+    xqc_pktno_range_t ack_9[] = {{.low = 9, .high = 9}};
+    uint64_t lost = conn->detected_loss_cnt;
+
+    xqc_test_pc_send(path, 1, 0);
+    xqc_test_pc_send(path, 2, 10);
+    xqc_test_pc_ack(path, 12, ack_1, 1);
+    xqc_test_pc_send(path, 3, 20);
+    xqc_test_pc_send(path, 4, 30);
+    /* packet 5 is ACK-only: it does not enter the unacked list */
+    path->path_pn_ctl->ctl_largest_sent[XQC_PNS_APP_DATA] = 5;
+    xqc_test_pc_ack(path, 45, ack_5, 1);
+    xqc_test_pc_send(path, 6, 50);
+    xqc_test_pc_send(path, 7, 60);
+    xqc_test_pc_send(path, 8, 80);
+    xqc_test_pc_send(path, 9, 120);
+    path->path_send_ctl->ctl_pto_count = 2;
+    xqc_test_pc_ack(path, 150, ack_9, 1);
+
+    CU_ASSERT_EQUAL(conn->detected_loss_cnt, lost + 6);
+    CU_ASSERT(!xqc_test_pc_declared(path));
+    CU_ASSERT_EQUAL(path->path_send_ctl->ctl_srtt, 10000);
+    xqc_engine_destroy(conn->engine);
+}
+
+
+/*
+ * RFC 9002 7.6.2: "a prior RTT sample existed when these two packets were
+ * sent". Before the handshake is confirmed, max_ack_delay does not bound
+ * the peer's ACK delays (RFC 9002 5.3), and the duration counts on it:
+ * packets sent before do not count either. With the first RTT sample or
+ * the confirmation at 25 ms, the packets lost from 30 ms on make a period
+ * of 50 ms; without the confirmation, none counts.
+ */
+void
+xqc_test_send_ctl_pc_needs_sample_and_confirmation(void)
+{
+    for (int i = 0; i < 4; i++) {
+        xqc_connection_t *conn = test_engine_connect();
+        CU_ASSERT_FATAL(conn != NULL);
+        xqc_path_ctx_t *path = conn->conn_initial_path;
+
+        xqc_test_pc_setup(path);
+        if (i == 1) {
+            path->path_send_ctl->ctl_first_rtt_sample_time =
+                xqc_test_pc_ms(25);
+
+        } else if (i == 2) {
+            conn->handshake_confirmed_time = xqc_test_pc_ms(25);
+
+        } else if (i == 3) {
+            conn->conn_flag &= ~XQC_CONN_FLAG_HANDSHAKE_CONFIRMED;
+        }
+
+        /* i == 0: both before t0, the period is 70 ms */
+        CU_ASSERT_EQUAL(xqc_test_pc_example(path, 150, XQC_FALSE), i == 0);
+        xqc_engine_destroy(conn->engine);
+    }
+}
+
+
+/*
+ * A failure of case 727 (stream_reassembly_cap_happy): the server's ACK
+ * declared lost six packets sent within 2.1 ms, the last one 449 ms
+ * before, after two PTOs, with srtt 1.8 ms and rttvar 0.9 ms. That is
+ * no persistent congestion: the duration is (1835 + 4 * 933 + 25000) * 3
+ * = 91.7 ms, and the period 2.1 ms. Taking the time since the last lost
+ * packet was sent reset the RTT estimate to 250 ms and its PTO backed off
+ * past the client's idle timeout.
+ */
+void
+xqc_test_send_ctl_pc_lost_close_together(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+    xqc_send_ctl_t *send_ctl = conn->conn_initial_path->path_send_ctl;
+    xqc_packet_number_t pn[] = {2010, 2026, 2034, 2036, 2045, 2047};
+    xqc_usec_t sent[] = {0, 1076, 1358, 1424, 2063, 2127};
+    uint64_t lost = conn->detected_loss_cnt;
+
+    conn->remote_settings.max_ack_delay = 25;
+    xqc_test_send_ctl_arm_pc_state(send_ctl, 1835, 933, 204, 2056);
+    send_ctl->ctl_pto_count = 2;
+    for (int i = 0; i < 6; i++) {
+        CU_ASSERT_FATAL(xqc_test_send_ctl_seed_lost_packet(conn, pn[i],
+                            XQC_TEST_PC_T0 + sent[i]) != NULL);
+    }
+
+    xqc_send_ctl_detect_lost(send_ctl, conn->conn_send_queue,
+                             XQC_PNS_APP_DATA, XQC_TEST_PC_T0 + 451425);
+
+    CU_ASSERT_EQUAL(conn->detected_loss_cnt, lost + 6);
+    CU_ASSERT_EQUAL(send_ctl->ctl_srtt, 1835);
+    CU_ASSERT_EQUAL(send_ctl->ctl_rttvar, 933);
+    CU_ASSERT_EQUAL(send_ctl->ctl_minrtt, 204);
+    CU_ASSERT(send_ctl->ctl_first_rtt_sample_time != 0);
+
+    xqc_engine_destroy(conn->engine);
+}
+
+
+/* xqc_timer.c has no public prototype for the loss detection callback */
+void xqc_timer_loss_detection_timeout(xqc_timer_type_t type, xqc_usec_t now,
+    void *user_data);
+
+/*
+ * The other caller of xqc_send_ctl_detect_lost: the loss timer declares
+ * lost the packets that an ACK left to the time threshold. It looks at the
+ * period over which they were sent too, not at the time since: firing
+ * late, 500 ms after packets sent 1 ms apart, it finds no persistent
+ * congestion, whatever the PTO count.
+ */
+void
+xqc_test_send_ctl_pc_loss_timer(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+    xqc_path_ctx_t *path = conn->conn_initial_path;
+    xqc_send_ctl_t *send_ctl = path->path_send_ctl;
+    xqc_pktno_range_t ack_4[] = {{.low = 4, .high = 4}};
+    uint64_t lost = conn->detected_loss_cnt;
+
+    xqc_test_pc_setup(path);
+    for (xqc_packet_number_t pn = 1; pn <= 4; pn++) {
+        xqc_test_pc_send(path, pn, pn - 1);
+    }
+
+    /* packet 1 is lost by the packet threshold, 2 and 3 not yet */
+    xqc_test_pc_ack(path, 5, ack_4, 1);
+    CU_ASSERT_EQUAL(conn->detected_loss_cnt, lost + 1);
+    CU_ASSERT(send_ctl->ctl_loss_time[XQC_PNS_APP_DATA] != 0);
+
+    send_ctl->ctl_pto_count = 2;
+    xqc_timer_loss_detection_timeout(XQC_TIMER_LOSS_DETECTION,
+                                     xqc_test_pc_ms(500), send_ctl);
+
+    CU_ASSERT_EQUAL(conn->detected_loss_cnt, lost + 3);
+    CU_ASSERT(!xqc_test_pc_declared(path));
+    CU_ASSERT_EQUAL(send_ctl->ctl_srtt, 10000);
+
+    xqc_engine_destroy(conn->engine);
+}
+
+
+/* the packet leaves the path at t0 + ms with that number */
+static void
+xqc_test_pc_sent(xqc_path_ctx_t *path, xqc_packet_out_t *po,
+    xqc_packet_number_t pkt_num, xqc_usec_t ms)
+{
+    xqc_send_queue_t *sq = path->parent_conn->conn_send_queue;
+
+    po->po_pkt.pkt_num = pkt_num;
+    po->po_sent_time = xqc_test_pc_ms(ms);
+    xqc_send_ctl_on_packet_sent(path->path_send_ctl, path->path_pn_ctl, po,
+                                po->po_sent_time);
+    xqc_send_queue_insert_unacked(po,
+        &sq->sndq_unacked_packets[XQC_PNS_APP_DATA], sq);
+}
+
+
+/* a packet of STREAM data, which a PTO copies */
+static void
+xqc_test_pc_send_stream(xqc_path_ctx_t *path, xqc_packet_number_t pkt_num,
+    xqc_usec_t ms)
+{
+    xqc_packet_out_t *po = xqc_packet_out_get(
+                               path->parent_conn->conn_send_queue);
+
+    CU_ASSERT_FATAL(po != NULL);
+    po->po_pkt.pkt_type = XQC_PTYPE_SHORT_HEADER;
+    po->po_pkt.pkt_pns  = XQC_PNS_APP_DATA;
+    po->po_path_id      = path->path_id;
+    po->po_frame_types  = XQC_FRAME_BIT_STREAM;
+    po->po_used_size    = 100;
+    xqc_test_pc_sent(path, po, pkt_num, ms);
+}
+
+
+/*
+ * The PTO expires at t0 + ms: xqc_path_send_one_or_two_ack_elicit_pkts
+ * copies two packets and the copies leave at once, numbered from pkt_num.
+ * Returns the next packet number.
+ */
+static xqc_packet_number_t
+xqc_test_pc_pto(xqc_path_ctx_t *path, xqc_usec_t ms,
+    xqc_packet_number_t pkt_num)
+{
+    xqc_send_queue_t *sq = path->parent_conn->conn_send_queue;
+    xqc_list_head_t *pos, *next;
+    xqc_packet_out_t *po;
+
+    xqc_timer_loss_detection_timeout(XQC_TIMER_LOSS_DETECTION,
+                                     xqc_test_pc_ms(ms), path->path_send_ctl);
+    xqc_list_for_each_safe(pos, next, &sq->sndq_pto_probe_packets) {
+        po = xqc_list_entry(pos, xqc_packet_out_t, po_list);
+        CU_ASSERT_FATAL(po->po_origin != NULL);
+        xqc_send_queue_remove_probe(pos);
+        xqc_test_pc_sent(path, po, pkt_num++, ms);
+    }
+
+    return pkt_num;
+}
+
+
+/*
+ * A blackout on STREAM data: packets 1 to n leave 1 ms apart, then each
+ * PTO copies the first two of them again, as xqc_conn_send_probe_pkt takes
+ * the originals out of flight. The ACK of the copies sent on the third PTO
+ * makes the other copies and the originals copies of acknowledged data,
+ * which xquic drops without marking them lost, but none of them was
+ * acknowledged itself: all are lost (RFC 9002 7.6.2), from 0 to n - 1 + 60
+ * ms, more than the duration. With only two packets, the originals carry
+ * the period over it.
+ */
+void
+xqc_test_send_ctl_pc_pto_copies(void)
+{
+    for (xqc_packet_number_t n = 4; n >= 2; n -= 2) {
+        xqc_connection_t *conn = test_engine_connect();
+        CU_ASSERT_FATAL(conn != NULL);
+        xqc_path_ctx_t *path = conn->conn_initial_path;
+        xqc_usec_t last = n - 1;
+        xqc_packet_number_t pn;
+
+        xqc_test_pc_setup(path);
+        for (pn = 1; pn <= n; pn++) {
+            xqc_test_pc_send_stream(path, pn, pn - 1);
+        }
+        pn = xqc_test_pc_pto(path, last + 20, n + 1);
+        pn = xqc_test_pc_pto(path, last + 60, pn);
+        pn = xqc_test_pc_pto(path, last + 140, pn);
+        CU_ASSERT_EQUAL(path->path_send_ctl->ctl_pto_count, 3);
+
+        xqc_pktno_range_t ack[] = {{.low = pn - 2, .high = pn - 1}};
+        xqc_test_pc_ack(path, last + 142, ack, 1);
+        CU_ASSERT(xqc_test_pc_declared(path));
+
+        xqc_engine_destroy(conn->engine);
+    }
+}
+
+
+/*
+ * Abnormal path: a PTO copy is no loss of an original that is
+ * acknowledged itself, late, which makes the PTO a spurious loss. Packet 1,
+ * sent at 0, is copied by PTOs at 20, 62 and 145 ms, and acknowledged with
+ * the last copy at 147 ms. The copies sent at 20 and 62 ms are lost: 42 ms
+ * apart, less than the duration, and packet 1 must not stretch that to
+ * 62 ms.
+ */
+void
+xqc_test_send_ctl_pc_pto_spurious(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+    xqc_path_ctx_t *path = conn->conn_initial_path;
+    xqc_packet_number_t pn;
+
+    xqc_test_pc_setup(path);
+    xqc_test_pc_send_stream(path, 1, 0);
+    pn = xqc_test_pc_pto(path, 20, 2);
+    pn = xqc_test_pc_pto(path, 62, pn);
+    pn = xqc_test_pc_pto(path, 145, pn);
+
+    xqc_pktno_range_t ack[] = {{.low = pn - 1, .high = pn - 1},
+                               {.low = 1, .high = 1}};
+    xqc_test_pc_ack(path, 147, ack, 2);
+    CU_ASSERT_EQUAL(path->path_send_ctl->ctl_spurious_loss_count, 1);
+    CU_ASSERT(!xqc_test_pc_declared(path));
+    CU_ASSERT_EQUAL(path->path_send_ctl->ctl_srtt, 10000);
+
+    xqc_engine_destroy(conn->engine);
+}
+
+
+/*
+ * RFC 9000 14.4: the loss of a PMTU probe is no sign of congestion, nor of
+ * persistent congestion: with the probe of Test A's second packet, a
+ * single packet counts.
+ */
+void
+xqc_test_send_ctl_pc_lost_pmtud_probe(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+    xqc_send_ctl_t *send_ctl = conn->conn_initial_path->path_send_ctl;
+
+    conn->remote_settings.max_ack_delay = 25;
+    xqc_test_send_ctl_arm_pc_state(send_ctl, 10000, 2000, 8000, 2);
+    CU_ASSERT_FATAL(xqc_test_send_ctl_seed_lost_packet(conn, 1, 2) != NULL);
+    xqc_packet_out_t *po = xqc_test_send_ctl_seed_lost_packet(conn, 2,
+                                                               200002);
+    CU_ASSERT_FATAL(po != NULL);
+    po->po_flag |= XQC_POF_PMTUD_PROBING;
+
+    xqc_send_ctl_detect_lost(send_ctl, conn->conn_send_queue,
+                             XQC_PNS_APP_DATA, 1000000);
+
+    CU_ASSERT_EQUAL(send_ctl->ctl_srtt, 10000);
+    CU_ASSERT_EQUAL(send_ctl->ctl_minrtt, 8000);
+    CU_ASSERT(send_ctl->ctl_first_rtt_sample_time != 0);
+
+    xqc_engine_destroy(conn->engine);
+}
+
+
+/* xqc_path_create has no public prototype, see xqc_test_path_hard_cap.c */
+extern xqc_path_ctx_t *xqc_path_create(xqc_connection_t *conn,
+    xqc_cid_t *scid, xqc_cid_t *dcid, uint64_t path_id);
+
+/*
+ * Multipath: each path has its own packet numbers and send control, so its
+ * own persistent congestion. Paths 0 and 1 send the example's packets
+ * alternately. The ACK on path 1 at 150 ms also acknowledges its packet 5:
+ * no persistent congestion there, and nothing changes on path 0. The ACK
+ * on path 0 then declares its packets 2 to 8 lost over 70 ms: persistent
+ * congestion on path 0 only.
+ */
+void
+xqc_test_send_ctl_pc_per_path(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_FATAL(conn != NULL);
+    xqc_path_ctx_t *p0 = conn->conn_initial_path;
+    xqc_cid_t cid;
+
+    conn->enable_multipath = 1;
+    conn->local_max_path_id = 1;
+    CU_ASSERT_FATAL(xqc_generate_cid(conn->engine, NULL, &cid, 0) == XQC_OK);
+    cid.path_id = 1;
+    CU_ASSERT_FATAL(xqc_cid_set_add_path(&conn->scid_set, 1) == XQC_OK);
+    CU_ASSERT_FATAL(xqc_cid_set_insert_cid(&conn->scid_set, &cid,
+                                           XQC_CID_UNUSED, 2, 1) == XQC_OK);
+    CU_ASSERT_FATAL(xqc_cid_set_add_path(&conn->dcid_set, 1) == XQC_OK);
+    CU_ASSERT_FATAL(xqc_cid_set_insert_cid(&conn->dcid_set, &cid,
+                                           XQC_CID_UNUSED, 2, 1) == XQC_OK);
+    xqc_path_ctx_t *p1 = xqc_path_create(conn, NULL, NULL, 1);
+    CU_ASSERT_FATAL(p1 != NULL);
+
+    xqc_pktno_range_t ack_1[] = {{.low = 1, .high = 1}};
+    xqc_pktno_range_t ack_9[] = {{.low = 9, .high = 9}};
+    xqc_pktno_range_t ack_9_5[] = {{.low = 9, .high = 9},
+                                   {.low = 5, .high = 5}};
+    xqc_usec_t sent[] = {0, 10, 20, 30, 40, 50, 60, 80, 120};
+    uint64_t lost = conn->detected_loss_cnt;
+
+    xqc_test_pc_setup(p0);
+    xqc_test_pc_setup(p1);
+    for (xqc_packet_number_t pn = 1; pn <= 9; pn++) {
+        xqc_test_pc_send(p0, pn, sent[pn - 1]);
+        xqc_test_pc_send(p1, pn, sent[pn - 1] + 1);
+        if (pn == 2) {
+            xqc_test_pc_ack(p0, 12, ack_1, 1);
+            xqc_test_pc_ack(p1, 12, ack_1, 1);
+        }
+    }
+
+    xqc_test_pc_ack(p1, 150, ack_9_5, 2);
+    CU_ASSERT_EQUAL(conn->detected_loss_cnt, lost + 6);
+    CU_ASSERT(!xqc_test_pc_declared(p1));
+    CU_ASSERT(!xqc_test_pc_declared(p0));
+    CU_ASSERT_EQUAL(p0->path_send_ctl->ctl_largest_acked[XQC_PNS_APP_DATA],
+                    1);
+
+    xqc_test_pc_ack(p0, 150, ack_9, 1);
+    CU_ASSERT_EQUAL(conn->detected_loss_cnt, lost + 13);
+    CU_ASSERT(xqc_test_pc_declared(p0));
+    CU_ASSERT(!xqc_test_pc_declared(p1));
 
     xqc_engine_destroy(conn->engine);
 }
@@ -1107,8 +2079,8 @@ xqc_test_effective_pto_count_bounds(void)
 /*
  * RFC 9000 14.4: the loss of a PMTU probe "SHOULD NOT trigger a congestion
  * control reaction" (also RFC 8899 3, item 7). Both tests arm the
- * persistent-congestion state, so a probe counted as a loss would also
- * collapse cwnd and reset the RTT estimator.
+ * persistent-congestion state; xqc_test_send_ctl_pc_lost_pmtud_probe
+ * checks that a lost probe does not count toward persistent congestion.
  */
 static void
 xqc_test_send_ctl_lost_packet_cc(xqc_bool_t pmtud_probe)

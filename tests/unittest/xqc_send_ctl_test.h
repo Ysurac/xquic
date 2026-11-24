@@ -19,6 +19,24 @@ void xqc_test_path_validation_timeout_new_path_pto_dominates(void);
 void xqc_test_path_validation_timer_not_extended_by_packet(void);
 
 /*
+ * RFC 9000 Sections 8.2.2 and 8.2.4: a PATH_CHALLENGE acknowledged without a
+ * PATH_RESPONSE is followed by another one, and none once the path is
+ * validated.
+ */
+void xqc_test_path_challenge_resent_after_unanswered_ack(void);
+void xqc_test_path_challenge_not_resent_once_answered(void);
+
+/*
+ * An acknowledgment found through a copy of the packet, without a time, does
+ * not send a PATH_CHALLENGE at once; a PATH_RESPONSE to an earlier
+ * PATH_CHALLENGE of the validation still validates the path (RFC 9000
+ * Section 8.2.3), and so does one to the last PATH_CHALLENGE written.
+ */
+void xqc_test_path_challenge_not_resent_at_once(void);
+void xqc_test_path_challenge_earlier_response_validates(void);
+void xqc_test_path_challenge_write_error_keeps_payload(void);
+
+/*
  * RFC 9002 5.3: xqc_send_ctl_update_rtt caps ack_delay by the peer's
  * max_ack_delay once the handshake is confirmed, judged by when the ACK
  * arrived. Before that it subtracts ack_delay in full, and ignores a
@@ -51,8 +69,8 @@ void xqc_test_send_ctl_granularity_defers_before_boundary(void);
  * - rtt_reseeds_from_new_sample: after reset, the very next sample
  *   becomes the new srtt/min_rtt directly (not smoothed with the
  *   stale srtt that triggered the reset).
- * - single_loss_does_not_reset_rtt: ordinary loss that fails the
- *   persistent-congestion predicate must leave RTT state untouched.
+ * - single_loss_does_not_reset_rtt: a single lost packet, which cannot
+ *   establish persistent congestion, must leave RTT state untouched.
  * - no_rtt_sample_early_return: when no RTT sample has been taken
  *   yet, detect_lost returns before the persistent-congestion check
  *   and must not mutate RTT state.
@@ -62,6 +80,23 @@ void xqc_test_send_ctl_persistent_congestion_rtt_reseeds_from_new_sample(void);
 void xqc_test_send_ctl_key_phase_acked_by_sent_packet_only(void);
 void xqc_test_send_ctl_single_loss_does_not_reset_rtt(void);
 void xqc_test_send_ctl_persistent_congestion_no_rtt_sample_early_return(void);
+
+/*
+ * RFC 9002 7.6.2: persistent congestion takes two lost ack-eliciting
+ * packets sent after an RTT sample, and after the handshake is confirmed,
+ * with no packet acknowledged in between, over longer than the duration
+ * of 7.6.1; not the time since the last lost packet was sent, nor PTOs.
+ * Per path with multipath.
+ */
+void xqc_test_send_ctl_pc_rfc9002_example(void);
+void xqc_test_send_ctl_pc_acked_in_between(void);
+void xqc_test_send_ctl_pc_needs_sample_and_confirmation(void);
+void xqc_test_send_ctl_pc_lost_close_together(void);
+void xqc_test_send_ctl_pc_loss_timer(void);
+void xqc_test_send_ctl_pc_lost_pmtud_probe(void);
+void xqc_test_send_ctl_pc_per_path(void);
+void xqc_test_send_ctl_pc_pto_copies(void);
+void xqc_test_send_ctl_pc_pto_spurious(void);
 
 /*
  * RFC 9000 14.4: a lost PMTU probe is dropped without a congestion

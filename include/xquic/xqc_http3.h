@@ -332,25 +332,9 @@ typedef struct xqc_h3_conn_settings_s {
     size_t extern_settings_count;
 
     /**
-     * Local receive limit, never sent to the peer: high-water mark, in bytes,
-     * on request body data received but not yet read by the application with
-     * xqc_h3_request_recv_body().
-     *
-     * Once a request holds at least this many unread body bytes, the HTTP/3
-     * layer stops reading that request's QUIC stream. The data stays in the
-     * transport receive buffer, so no stream flow-control credit is returned
-     * and RFC 9000 flow control slows the sender down. Reading resumes on its
-     * own once xqc_h3_request_recv_body() takes the buffer below the mark, or
-     * when the peer resets the stream. The check runs between transport reads
-     * of at most 4 KB, so the buffer can overshoot the mark by less than that.
-     * A paused request keeps the data it holds in the transport receive
-     * buffer counted against the connection-level flow-control window.
-     *
-     * Applies to request streams only: control, QPACK and bytestream streams
-     * and HTTP Datagrams are never paused.
-     *
-     * 0 (default) = unlimited: every received byte is read into the body
-     * buffer at once (the behaviour before this field existed).
+     * Older name of xqc_conn_settings_t.max_body_buf_per_stream, kept for
+     * source compatibility: used as that limit, with its behaviour, on any
+     * connection whose max_body_buf_per_stream is 0. 0 (default) = unlimited.
      */
     uint64_t recv_body_buf_high_water;
 

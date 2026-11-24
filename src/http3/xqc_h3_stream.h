@@ -81,14 +81,17 @@ typedef enum {
     XQC_HTTP3_STREAM_FLAG_ACTIVELY_CLOSED = 0x1000,
     /* FIN was sent and no data will be sent any more */
     XQC_HTTP3_STREAM_FLAG_FIN_SENT = 0x2000,
-    /* XQC_HTTP3_STREAM_FLAG_BODY_PAUSED indicates that the request holds
-       recv_body_buf_high_water unread body bytes, so the transport stream is
-       left unread until the application drains the body buffer. */
-    XQC_HTTP3_STREAM_FLAG_BODY_PAUSED = 0x4000,
-    /* XQC_HTTP3_STREAM_IN_BODY_NOTIFY is set while the read notify of this
-       stream is calling the application's body read callback. */
-    XQC_HTTP3_STREAM_IN_BODY_NOTIFY = 0x8000,
+    /* reading paused: the buffered body reached max_body_buf_per_stream */
+    XQC_HTTP3_STREAM_FLAG_BODY_BUF_PAUSED = 0x4000,
+    /* the request's own body notify is running (read notify) */
+    XQC_HTTP3_STREAM_FLAG_IN_BODY_NOTIFY = 0x8000,
 } xqc_h3_stream_flag;
+
+/* resume once the buffered body is at or below a quarter of the limit */
+#define XQC_H3_BODY_BUF_LOW_WATER(limit)    ((limit) / 4)
+
+/* capacity of a node that coalesces small DATA payloads */
+#define XQC_H3_BODY_BUF_MIN_BYTES_PER_NODE  256
 
 typedef struct xqc_h3_stream_pctx_s {
     /* parsing context for uni-stream type */
@@ -221,9 +224,23 @@ xqc_int_t xqc_h3_stream_send_goaway(xqc_h3_stream_t *h3s, uint64_t push_id, uint
 
 xqc_int_t xqc_h3_stream_process_blocked_stream(xqc_h3_stream_t *h3s);
 
-/* the application read body bytes: resume reading a paused request stream
-   once its body buffer is below recv_body_buf_high_water */
-void xqc_h3_stream_on_body_read(xqc_h3_stream_t *h3s);
+/* a paused request is at or below the low-water mark: have it read again */
+void xqc_h3_stream_body_buf_resume(xqc_h3_stream_t *h3s);
+
+/* queue the stream for reading: wake the engine from outside, or arm the
+ * revisit timer inside */
+void xqc_h3_stream_ready_and_wake(xqc_h3_stream_t *h3s);
+
+/*
+ * An application-closed request (only with max_body_buf_per_stream > 0): no
+ * more parsing, read or closing notifications; its read turn drops what
+ * remains so the credit returns.
+ */
+xqc_bool_t xqc_h3_stream_in_discard(const xqc_h3_stream_t *h3s);
+
+/* drop all QPACK-blocked state; only where no iteration holds a blocked_buf
+ * element across a callback */
+void xqc_h3_stream_release_blocked(xqc_h3_stream_t *h3s);
 
 xqc_var_buf_t *xqc_h3_stream_get_send_buf(xqc_h3_stream_t *h3s);
 

@@ -808,6 +808,184 @@ xqc_path_move_unack_packets_from_conn(xqc_path_ctx_t *path, xqc_connection_t *co
     }
 }
 
+/* A path that times out XQC_PATH_REQUEUE_PTO_THRESH times in a row while
+ * another path still works has most likely stopped delivering (an outage
+ * with the link and routes up). Nothing it sent can be declared lost by the
+ * usual thresholds, since those need an ACK of a later packet on the same
+ * path, and its PTO probes go down the same dead path. Until the path comes
+ * back, the receiver then waits for every STREAM frame that was in flight
+ * on it, and the stream stalls on the paths that work. Move the path's
+ * unacknowledged packets to the lost queue now, so that their data is sent
+ * again on the paths that work, as when a path is frozen.
+ *
+ * A PTO does not declare packets lost (RFC 9002 Section 6.2), but
+ * draft-ietf-quic-multipath-21 Section 5.7 covers this case: on PTO
+ * expiration an endpoint can retransmit the delayed packets on the other
+ * paths. */
+void
+xqc_path_requeue_unacked_on_pto(xqc_path_ctx_t *path)
+{
+    xqc_connection_t *conn = path->parent_conn;
+    unsigned pto_count;
+
+    if (!conn->enable_multipath || path->path_state != XQC_PATH_STATE_ACTIVE) {
+        return;
+    }
+
+    /* Called before the PTO that just expired is counted. Only PTOs that
+     * fired count here, not those hidden by sends
+     * (xqc_send_ctl_get_effective_pto_count): once nothing is in flight the
+     * schedulers fall back to ctl_pto_count, which must then be high enough
+     * to keep the path out of use, or the data would go straight back to
+     * it. */
+    pto_count = path->path_send_ctl->ctl_pto_count + 1;
+    if (pto_count < XQC_PATH_REQUEUE_PTO_THRESH) {
+        return;
+    }
+
+    if (xqc_path_has_working_alternative(path)) {
+        xqc_log(conn->log, XQC_LOG_INFO,
+                "|path:%ui|pto_count:%ud|inflight:%ud|requeue unacked|",
+                path->path_id, pto_count,
+                path->path_send_ctl->ctl_bytes_in_flight);
+        xqc_path_move_unack_packets_from_conn(path, conn);
+    }
+}
+
+/* Is another active path still working, i.e. not frozen, without a socket
+ * error, and with fewer than XQC_PATH_REQUEUE_PTO_THRESH PTOs in a row? */
+xqc_bool_t
+xqc_path_has_working_alternative(xqc_path_ctx_t *path)
+{
+    xqc_connection_t *conn = path->parent_conn;
+    xqc_list_head_t *pos, *next;
+    xqc_path_ctx_t *other;
+
+    xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
+        other = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
+        if (other != path
+            && other->path_state == XQC_PATH_STATE_ACTIVE
+            && other->app_path_status != XQC_APP_PATH_STATUS_FROZEN
+            && !(other->path_flag & XQC_PATH_FLAG_SOCKET_ERROR)
+            && xqc_send_ctl_get_effective_pto_count(other->path_send_ctl)
+               < XQC_PATH_REQUEUE_PTO_THRESH)
+        {
+            return XQC_TRUE;
+        }
+    }
+    return XQC_FALSE;
+}
+
+/* A path that timed out XQC_PATH_REQUEUE_PTO_THRESH times in a row while
+ * another path works: its unacknowledged data was moved to the other paths
+ * (xqc_path_requeue_unacked_on_pto), and new data sent on it would most
+ * likely be lost too. Its PTO probes are sent on it directly, not through
+ * the scheduler, so it is used again once one of them is acknowledged. */
+xqc_bool_t
+xqc_path_is_dead_with_alternative(xqc_path_ctx_t *path)
+{
+    return path->parent_conn->enable_multipath
+        && xqc_send_ctl_get_effective_pto_count(path->path_send_ctl)
+           >= XQC_PATH_REQUEUE_PTO_THRESH
+        && xqc_path_has_working_alternative(path);
+}
+
+/* Is a path that is not STANDBY still working, i.e. active, not frozen,
+ * without a socket error, and with fewer than XQC_PATH_REQUEUE_PTO_THRESH
+ * PTOs in a row? Unlike xqc_path_has_working_alternative(), another STANDBY
+ * path does not count: an idle backup has a PTO count of 0 whether its
+ * link works or not. */
+static xqc_bool_t
+xqc_path_has_working_primary(xqc_path_ctx_t *path)
+{
+    xqc_connection_t *conn = path->parent_conn;
+    xqc_list_head_t *pos, *next;
+    xqc_path_ctx_t *other;
+
+    xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
+        other = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
+        if (other != path
+            && other->path_state == XQC_PATH_STATE_ACTIVE
+            && other->app_path_status != XQC_APP_PATH_STATUS_STANDBY
+            && other->app_path_status != XQC_APP_PATH_STATUS_FROZEN
+            && !(other->path_flag & XQC_PATH_FLAG_SOCKET_ERROR)
+            && xqc_send_ctl_get_effective_pto_count(other->path_send_ctl)
+               < XQC_PATH_REQUEUE_PTO_THRESH)
+        {
+            return XQC_TRUE;
+        }
+    }
+    return XQC_FALSE;
+}
+
+/* A STANDBY path left silent on purpose: standby probing is off
+ * (standby_path_probe_timeout == 0) and a path that is not STANDBY works.
+ * Neither the keep-alive PING nor the path idle timer touches it, so a
+ * backup on a metered or battery-bound link (cellular) can stay idle until
+ * it is needed. Another STANDBY path does not count as working: with two
+ * idle backups, each would otherwise make the other quiet, and once the
+ * primary goes silent with its link up nothing would keep the connection
+ * alive. */
+xqc_bool_t
+xqc_path_is_quiet_standby(xqc_path_ctx_t *path)
+{
+    xqc_connection_t *conn = path->parent_conn;
+
+    return conn->enable_multipath
+        && path->path_state == XQC_PATH_STATE_ACTIVE
+        && path->app_path_status == XQC_APP_PATH_STATUS_STANDBY
+        && conn->conn_settings.standby_path_probe_timeout == 0
+        && xqc_path_has_working_primary(path);
+}
+
+/* A quiet backup that stops being quiet, because its primary went silent,
+ * has heard nothing from this end for as long as it was quiet, and its NAT
+ * mapping may have expired: until this end sends on it, the peer's traffic
+ * cannot reach it. Send it a PING at the first send round after it stops
+ * being quiet, rather than at the next keep-alive, up to 15 s later. Like
+ * the other probes, only when one packet fits its congestion window, since
+ * the probe list does not check it. Its idle timer restarts only when a
+ * packet is received, and none came while it was quiet: restart it here,
+ * so that the peer has a full idle period to answer. */
+void
+xqc_conn_wake_quiet_standby(xqc_connection_t *conn)
+{
+    xqc_list_head_t *pos, *next;
+    xqc_path_ctx_t *path;
+    xqc_packet_out_t probe;
+    xqc_bool_t quiet;
+
+    if (conn->conn_state != XQC_CONN_STATE_ESTABED) {
+        return;
+    }
+
+    xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
+        path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
+        quiet = xqc_path_is_quiet_standby(path);
+        if (path->path_was_quiet_standby && !quiet
+            && path->path_state == XQC_PATH_STATE_ACTIVE)
+        {
+            xqc_timer_set(&path->path_send_ctl->path_timer_manager,
+                          XQC_TIMER_PATH_IDLE, xqc_monotonic_timestamp(),
+                          xqc_path_get_idle_timeout(path) * 1000);
+
+            memset(&probe, 0, sizeof(probe));
+            probe.po_used_size = path->curr_pkt_out_size;
+            if (path->app_path_status == XQC_APP_PATH_STATUS_STANDBY
+                && xqc_send_ctl_can_send(path->path_send_ctl, &probe,
+                                         path->path_schedule_bytes)
+                && xqc_path_send_ping_to_probe(path, XQC_PNS_APP_DATA,
+                                               XQC_PATH_SPECIFIED_BY_PQP)
+                   == XQC_OK)
+            {
+                xqc_log(conn->log, XQC_LOG_INFO,
+                        "|path:%ui|quiet standby woken|", path->path_id);
+            }
+        }
+        path->path_was_quiet_standby = quiet;
+    }
+}
+
 void
 xqc_set_path_state(xqc_path_ctx_t *path, xqc_path_state_t dst_state)
 {
@@ -1056,6 +1234,16 @@ xqc_conn_create_path(xqc_engine_t *engine, const xqc_cid_t *scid, uint64_t *new_
         conn->conn_flag |= XQC_CONN_FLAG_MP_WAIT_MP_READY;
         xqc_log(conn->log, XQC_LOG_WARN,
                 "|don't have available cid for new path|");
+
+        /*
+         * PATHS_BLOCKED is a frame of draft-ietf-quic-multipath-21
+         * (Section 4.7) that draft-10 does not have: a peer that
+         * negotiated draft-10 closes the connection on it, as on any
+         * frame type it does not know (RFC 9000 Section 12.4).
+         */
+        if (conn->conn_settings.multipath_version != XQC_MULTIPATH_3E) {
+            return -XQC_EMP_NO_AVAIL_PATH_ID;
+        }
 
         /* G-P16 (draft-21 §3.2.1 ¶7 / §4.7): we are unable to create a new
          * path because the path_id namespace is exhausted (peer has not
@@ -1834,6 +2022,112 @@ xqc_path_get_validation_timeout(xqc_path_ctx_t *path)
     return 3 * xqc_max(current_pto, new_path_pto);
 }
 
+/*
+ * RFC 9000 Section 8.2.2: a PATH_CHALLENGE is answered by a single
+ * PATH_RESPONSE, and the peer is expected to send more PATH_CHALLENGE frames
+ * as necessary. A PATH_CHALLENGE acknowledged while its path is still
+ * validating was answered, but the PATH_RESPONSE was lost, and no PTO is left
+ * to send it again. Challenge the path again a PTO later, backing off like a
+ * probe, until it is validated or the deadline abandons it (Section 8.2.4).
+ */
+void
+xqc_path_on_challenge_acked(xqc_path_ctx_t *path, xqc_usec_t now)
+{
+    xqc_timer_manager_t *timer_manager;
+    xqc_usec_t interval;
+
+    timer_manager = &path->path_send_ctl->path_timer_manager;
+    if (path->path_state != XQC_PATH_STATE_VALIDATING
+        || xqc_timer_is_set(timer_manager, XQC_TIMER_PATH_CHALLENGE))
+    {
+        return;
+    }
+
+    /*
+     * a copy acknowledged through its original carries no time
+     * (xqc_send_ctl_indirectly_ack_or_drop_po()): arm the timer from now
+     */
+    if (now == 0) {
+        now = xqc_monotonic_timestamp();
+    }
+
+    interval = xqc_send_ctl_calc_pto(path->path_send_ctl)
+               << xqc_min(path->path_challenge_resends,
+                          XQC_PATH_CHALLENGE_MAX_BACKOFF);
+    xqc_timer_set(timer_manager, XQC_TIMER_PATH_CHALLENGE, now, interval);
+
+    xqc_log(path->parent_conn->log, XQC_LOG_DEBUG,
+            "|path challenge acked without response|path:%ui|resends:%ud|"
+            "interval:%ui|", path->path_id, path->path_challenge_resends,
+            interval);
+}
+
+void
+xqc_path_resend_challenge(xqc_path_ctx_t *path)
+{
+    xqc_connection_t *conn = path->parent_conn;
+    unsigned char prev[XQC_PATH_CHALLENGE_DATA_LEN];
+    xqc_int_t ret;
+
+    if (path->path_state != XQC_PATH_STATE_VALIDATING
+        || conn->conn_state >= XQC_CONN_STATE_CLOSING)
+    {
+        return;
+    }
+
+    /* the payload last sent stays until a PATH_CHALLENGE carries a new one */
+    xqc_memcpy(prev, path->path_challenge_data, XQC_PATH_CHALLENGE_DATA_LEN);
+
+    /* RFC 9000 Section 13.3: a different payload each time */
+    ret = xqc_generate_path_challenge_data(conn, path);
+    if (ret != XQC_OK) {
+        xqc_log(conn->log, XQC_LOG_ERROR,
+                "|xqc_generate_path_challenge_data error|%d|", ret);
+        return;
+    }
+
+    ret = xqc_write_path_challenge_frame_to_packet(conn, path, XQC_FALSE);
+    if (ret != XQC_OK) {
+        xqc_memcpy(path->path_challenge_data, prev,
+                   XQC_PATH_CHALLENGE_DATA_LEN);
+        xqc_log(conn->log, XQC_LOG_ERROR,
+                "|xqc_write_path_challenge_frame_to_packet error|%d|", ret);
+        return;
+    }
+
+    /* RFC 9000 Section 8.2.3: a PATH_RESPONSE to it still validates */
+    xqc_memcpy(path->path_challenge_prev[path->path_challenge_resends
+                                         % XQC_PATH_CHALLENGE_PREV_N],
+               prev, XQC_PATH_CHALLENGE_DATA_LEN);
+    path->path_challenge_resends++;
+    xqc_log(conn->log, XQC_LOG_DEBUG, "|resend path challenge|path:%ui|"
+            "resends:%ud|", path->path_id, path->path_challenge_resends);
+}
+
+/* PATH_RESPONSE data echoing the current or a kept earlier PATH_CHALLENGE */
+xqc_bool_t
+xqc_path_challenge_data_match(xqc_path_ctx_t *path, const unsigned char *data)
+{
+    uint32_t i, n;
+
+    if (memcmp(path->path_challenge_data, data,
+               XQC_PATH_CHALLENGE_DATA_LEN) == 0)
+    {
+        return XQC_TRUE;
+    }
+
+    n = xqc_min(path->path_challenge_resends, XQC_PATH_CHALLENGE_PREV_N);
+    for (i = 0; i < n; i++) {
+        if (memcmp(path->path_challenge_prev[i], data,
+                   XQC_PATH_CHALLENGE_DATA_LEN) == 0)
+        {
+            return XQC_TRUE;
+        }
+    }
+
+    return XQC_FALSE;
+}
+
 void
 xqc_path_validate(xqc_path_ctx_t *path)
 {
@@ -1842,6 +2136,8 @@ xqc_path_validate(xqc_path_ctx_t *path)
     if (path->path_state == XQC_PATH_STATE_VALIDATING) {
         xqc_set_path_state(path, XQC_PATH_STATE_ACTIVE);
         path->parent_conn->validated_path_count++;
+        xqc_timer_unset(&path->path_send_ctl->path_timer_manager,
+                        XQC_TIMER_PATH_CHALLENGE);
         xqc_timer_set(&path->path_send_ctl->path_timer_manager,
                       XQC_TIMER_PATH_IDLE, xqc_monotonic_timestamp(),
                       xqc_path_get_idle_timeout(path) * 1000);

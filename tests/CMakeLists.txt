@@ -120,6 +120,7 @@ if(HAVE_CUNIT)
         ${UNIT_TEST_DIR}/xqc_tls_test.c
         ${UNIT_TEST_DIR}/xqc_crypto_test.c
         ${UNIT_TEST_DIR}/xqc_h3_test.c
+        ${UNIT_TEST_DIR}/xqc_h3_body_buf_test.c
         ${UNIT_TEST_DIR}/xqc_hq_test.c
         ${CMAKE_SOURCE_DIR}/demo/xqc_hq_request.c
         ${UNIT_TEST_DIR}/xqc_stable_test.c
@@ -153,6 +154,7 @@ if(HAVE_CUNIT)
         ${UNIT_TEST_DIR}/xqc_conn_reapply_test.c
         ${UNIT_TEST_DIR}/xqc_send_ctl_test.c
         ${UNIT_TEST_DIR}/xqc_pmtud_test.c
+        ${UNIT_TEST_DIR}/xqc_path_requeue_test.c
         ${UNIT_TEST_DIR}/xqc_vn_test.c
         ${UNIT_TEST_DIR}/xqc_frame_type_bit_test.c
         ${UNIT_TEST_DIR}/xqc_applimit_test.c

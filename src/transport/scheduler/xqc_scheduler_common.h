@@ -51,4 +51,10 @@ void xqc_scheduler_standby_filter_init(xqc_sched_standby_filter_t *filter,
 xqc_bool_t xqc_scheduler_standby_skip(const xqc_sched_standby_filter_t *filter,
     xqc_path_ctx_t *path);
 
+/* PING a dead path (xqc_path_is_dead_with_alternative) at most once per
+ * XQC_SCHED_DEAD_PROBE_INTERVAL_US, so its ACK clears the PTO count soon
+ * after it is back. *last_probe is the caller's per-connection state. */
+#define XQC_SCHED_DEAD_PROBE_INTERVAL_US (500 * 1000)
+void xqc_scheduler_probe_dead_paths(xqc_connection_t *conn, xqc_usec_t *last_probe);
+
 #endif
