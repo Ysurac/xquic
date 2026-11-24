@@ -189,6 +189,14 @@ XQUIC_VERS_1.0 {
         xqc_h3_ext_masque_frame_udp;
         xqc_h3_ext_masque_udp_mss;
         xqc_h3_ext_masque_unframe_udp;
+        /* omr fork: path weight / DSCP API and schedulers, called by libmqvpn.so */
+        xqc_conn_set_dscp;
+        xqc_conn_set_path_dscp_mask;
+        xqc_conn_set_path_weight;
+        xqc_dscp_scheduler_cb;
+        xqc_redundant_scheduler_cb;
+        xqc_wrr_scheduler_cb;
+        xqc_wrtt_scheduler_cb;
     local:
         *;
 };
